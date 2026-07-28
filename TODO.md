@@ -21,101 +21,101 @@
 ### Sprint 1: Database & Core Models (Week 1)
 
 #### Setup & Project Structure
-- [ ] Create Python package structure
-  - [ ] `conductor/__init__.py` (package exports)
-  - [ ] `conductor/core/` (models, queue, worker)
-  - [ ] `conductor/db/` (database operations)
-  - [ ] `conductor/retry/` (retry logic)
-  - [ ] `conductor/dlq/` (dead letter queue)
-  - [ ] `conductor/observability/` (logging, metrics, health)
-  - [ ] `tests/` (unit, integration, e2e, perf)
-  - [ ] `examples/` (real-world usage examples)
-  - [ ] `docs/` (documentation)
+- [x] Create Python package structure
+  - [x] `conductor/__init__.py` (package exports)
+  - [x] `conductor/core/` (models, queue, worker)
+  - [x] `conductor/db/` (database operations)
+  - [x] `conductor/retry/` (retry logic)
+  - [x] `conductor/dlq/` (dead letter queue)
+  - [x] `conductor/observability/` (logging, metrics, health)
+  - [x] `tests/` (unit, integration, e2e, perf)
+  - [x] `examples/` (real-world usage examples)
+  - [x] `docs/` (documentation)
 
-- [ ] Create `setup.py` and `pyproject.toml`
-  - [ ] Define package metadata
-  - [ ] Add dependencies: asyncpg, aiohttp, pydantic, prometheus-client, python-dotenv
-  - [ ] Add dev dependencies: pytest, pytest-asyncio, pytest-cov, black, mypy, flake8
+- [x] Create `setup.py` and `pyproject.toml`
+  - [x] Define package metadata
+  - [x] Add dependencies: asyncpg, aiohttp, pydantic, prometheus-client, python-dotenv
+  - [x] Add dev dependencies: pytest, pytest-asyncio, pytest-cov, black, mypy, flake8
 
-- [ ] Create `.env.example`
-  - [ ] DATABASE_URL
-  - [ ] WORKER_ID
-  - [ ] CONCURRENCY
-  - [ ] POLL_INTERVAL
-  - [ ] LOG_LEVEL
-  - [ ] METRICS_PORT
+- [x] Create `.env.example`
+  - [x] DATABASE_URL
+  - [x] WORKER_ID
+  - [x] CONCURRENCY
+  - [x] POLL_INTERVAL
+  - [x] LOG_LEVEL
+  - [x] METRICS_PORT
 
 - [ ] Create `README.md` (placeholder, expand in Sprint 6)
 
 - [ ] Initialize Git repository (if not done)
-  - [ ] Create `.gitignore`
-  - [ ] Create `.npmignore` (for PyPI)
-  - [ ] Add LICENSE (MIT)
+  - [x] Create `.gitignore`
+  - [x] Create `.npmignore` (for PyPI)
+  - [x] Add LICENSE (MIT)
 
 #### Database Connection & Schema
-- [ ] Implement `conductor/db/connection.py`
-  - [ ] Create PostgreSQL connection pool using asyncpg
-  - [ ] Implement health check query
-  - [ ] Handle connection retries with backoff
-  - [ ] Support connection timeout configuration
-  - [ ] Add connection pooling (min_size, max_size, timeout)
+- [x] Implement `conductor/db/connection.py`
+  - [x] Create PostgreSQL connection pool using asyncpg
+  - [x] Implement health check query
+  - [x] Handle connection retries with backoff
+  - [x] Support connection timeout configuration
+  - [x] Add connection pooling (min_size, max_size, timeout)
 
-- [ ] Implement `conductor/db/schema.py`
-  - [ ] Define schema version management (`conductor_version` table)
-  - [ ] Create migration function for v0 → v1
-  - [ ] Implement auto-migration on startup
-  - [ ] Create `conductor_tasks` table with all columns and indexes
-  - [ ] Create `conductor_workers` table
-  - [ ] Create `conductor_retries` table
-  - [ ] Create `conductor_dead_letter` table
-  - [ ] Create `conductor_recurring_tasks` table (for v0.2)
-  - [ ] Add all indexes for performance
-  - [ ] Add constraints and checks
-  - [ ] Write migration rollback logic
+- [x] Implement `conductor/db/schema.py`
+  - [x] Define schema version management (`conductor_version` table)
+  - [x] Create migration function for v0 → v1
+  - [x] Implement auto-migration on startup
+  - [x] Create `conductor_tasks` table with all columns and indexes
+  - [x] Create `conductor_workers` table
+  - [x] Create `conductor_retries` table
+  - [x] Create `conductor_dead_letter` table
+  - [x] Create `conductor_recurring_tasks` table (for v0.2)
+  - [x] Add all indexes for performance
+  - [x] Add constraints and checks
+  - [x] Write migration rollback logic
 
-- [ ] Implement `conductor/db/queries.py`
-  - [ ] Build type-safe query builders (using raw SQL + asyncpg)
-  - [ ] Insert task query
-  - [ ] Select pending tasks query
-  - [ ] Update task status query
-  - [ ] Select completed tasks query
-  - [ ] Select failed tasks query
-  - [ ] Insert retry history query
-  - [ ] Move task to DLQ query
-  - [ ] Select DLQ tasks query
-  - [ ] Worker heartbeat insert/update
-  - [ ] Worker select by ID
-  - [ ] Add query parameter validation
-  - [ ] Add error handling
+- [x] Implement `conductor/db/queries.py`
+  - [x] Build type-safe query builders (using raw SQL + asyncpg)
+  - [x] Insert task query
+  - [x] Select pending tasks query
+  - [x] Update task status query
+  - [x] Select completed tasks query
+  - [x] Select failed tasks query
+  - [x] Insert retry history query
+  - [x] Move task to DLQ query
+  - [x] Select DLQ tasks query
+  - [x] Worker heartbeat insert/update
+  - [x] Worker select by ID
+  - [x] Add query parameter validation
+  - [x] Add error handling
 
 #### Data Models
-- [ ] Implement `conductor/core/models.py`
-  - [ ] Create `TaskStatus` enum (pending, processing, completed, failed, retrying)
-  - [ ] Create `Task` dataclass with full schema
-  - [ ] Create `RetryPolicy` dataclass
-  - [ ] Create `Worker` dataclass
-  - [ ] Create `RetryRecord` dataclass
-  - [ ] Create `DLQTask` dataclass
-  - [ ] Add Pydantic validation for all models
-  - [ ] Add JSON serialization/deserialization methods
-  - [ ] Add type hints for all fields
+- [x] Implement `conductor/core/models.py`
+  - [x] Create `TaskStatus` enum (pending, processing, completed, failed, retrying)
+  - [x] Create `Task` dataclass with full schema
+  - [x] Create `RetryPolicy` dataclass
+  - [x] Create `WorkerInfo` dataclass (worker registration data)
+  - [x] Create `RetryRecord` dataclass
+  - [x] Create `DLQTask` dataclass
+  - [x] Add Pydantic-like validation for all models
+  - [x] Add JSON serialization/deserialization methods
+  - [x] Add type hints for all fields
 
 #### Utilities & Exceptions
-- [ ] Implement `conductor/exceptions.py`
-  - [ ] Define `ConductorException` (base)
-  - [ ] Define `DatabaseError`
-  - [ ] Define `WorkerError`
-  - [ ] Define `TaskError`
-  - [ ] Define `RetryPolicyError`
-  - [ ] Define `ConnectionError`
+- [x] Implement `conductor/exceptions.py`
+  - [x] Define `ConductorException` (base)
+  - [x] Define `DatabaseError`
+  - [x] Define `WorkerError`
+  - [x] Define `TaskError`
+  - [x] Define `RetryPolicyError`
+  - [x] Define `ConductorConnectionError`
 
 - [ ] Implement `conductor/utils.py`
-  - [ ] Task ID generation (UUID v4)
-  - [ ] Timestamp utilities (UTC handling)
-  - [ ] Payload serialization (JSON)
-  - [ ] Payload deserialization (with error handling)
-  - [ ] Correlation ID generation
-  - [ ] Hostname/PID utilities for worker identification
+  - [x] Task ID generation (UUID v4) — in `conductor/core/models.py`
+  - [x] Timestamp utilities (UTC handling) — in `conductor/core/models.py`
+  - [x] Payload serialization (JSON) — in `conductor/core/models.py`
+  - [x] Payload deserialization (with error handling) — in `conductor/core/models.py`
+  - [x] Correlation ID generation — in `conductor/core/models.py`
+  - [x] Hostname/PID utilities for worker identification — in `conductor/core/models.py`
 
 #### Unit Tests (Sprint 1)
 - [ ] Create test fixtures
