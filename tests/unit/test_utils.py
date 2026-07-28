@@ -24,48 +24,48 @@ from conductor.exceptions import TaskError
 
 class TestGenerateTaskId:
 
-    def test_type(self):
+    def test_type(self) -> None:
         tid = generate_task_id()
         assert isinstance(tid, str)
 
-    def test_format(self):
+    def test_format(self) -> None:
         tid = generate_task_id()
         # UUID v4: 8-4-4-4-12 hex digits = 36 chars
         assert len(tid) == 36
         assert tid.count("-") == 4
 
-    def test_uniqueness(self):
+    def test_uniqueness(self) -> None:
         ids = {generate_task_id() for _ in range(1000)}
         assert len(ids) == 1000
 
 
 class TestGenerateCorrelationId:
 
-    def test_type(self):
+    def test_type(self) -> None:
         cid = generate_correlation_id()
         assert isinstance(cid, str)
 
-    def test_prefix(self):
+    def test_prefix(self) -> None:
         cid = generate_correlation_id()
         assert cid.startswith("corr_")
 
-    def test_length(self):
+    def test_length(self) -> None:
         cid = generate_correlation_id()
         # "corr_" (5) + 32 hex chars = 37
         assert len(cid) == 37
 
-    def test_uniqueness(self):
+    def test_uniqueness(self) -> None:
         ids = {generate_correlation_id() for _ in range(1000)}
         assert len(ids) == 1000
 
 
 class TestUtcNow:
 
-    def test_type(self):
+    def test_type(self) -> None:
         now = utc_now()
         assert hasattr(now, "tzinfo")
 
-    def test_timezone(self):
+    def test_timezone(self) -> None:
         now = utc_now()
         assert now.tzinfo is not None
         assert str(now.tzinfo) == "UTC"
@@ -73,29 +73,29 @@ class TestUtcNow:
 
 class TestSerializePayload:
 
-    def test_simple_dict(self):
+    def test_simple_dict(self) -> None:
         result = serialize_payload({"a": 1, "b": "hello"})
         assert result == '{"a": 1, "b": "hello"}'
 
-    def test_nested(self):
+    def test_nested(self) -> None:
         result = serialize_payload({"x": {"y": [1, 2, 3]}})
         assert '"y"' in result
 
-    def test_empty(self):
+    def test_empty(self) -> None:
         assert serialize_payload({}) == "{}"
 
 
 class TestDeserializePayload:
 
-    def test_simple(self):
+    def test_simple(self) -> None:
         result = deserialize_payload('{"a": 1}')
         assert result == {"a": 1}
 
-    def test_invalid_json(self):
+    def test_invalid_json(self) -> None:
         with pytest.raises(TaskError):
             deserialize_payload("not json")
 
-    def test_round_trip(self):
+    def test_round_trip(self) -> None:
         original = {"key": "value", "nested": {"a": [1, 2]}}
         serialized = serialize_payload(original)
         deserialized = deserialize_payload(serialized)
@@ -104,17 +104,17 @@ class TestDeserializePayload:
 
 class TestHostnameAndPid:
 
-    def test_get_hostname(self):
+    def test_get_hostname(self) -> None:
         host = get_hostname()
         assert isinstance(host, str)
         assert len(host) > 0
 
-    def test_get_pid(self):
+    def test_get_pid(self) -> None:
         pid = get_pid()
         assert isinstance(pid, int)
         assert pid > 0
 
-    def test_get_worker_label(self):
+    def test_get_worker_label(self) -> None:
         label = get_worker_label()
         assert isinstance(label, str)
         assert "-" in label

@@ -7,6 +7,8 @@ They are skipped automatically if the database is unreachable.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from conductor.db.schema import SCHEMA_VERSION, CREATE_VERSION_TABLE
@@ -21,10 +23,10 @@ pytestmark = pytest.mark.integration
 
 class TestSchemaConstants:
 
-    def test_schema_version(self):
+    def test_schema_version(self) -> None:
         assert SCHEMA_VERSION == 1
 
-    def test_version_table_sql(self):
+    def test_version_table_sql(self) -> None:
         assert "conductor_version" in CREATE_VERSION_TABLE
 
 
@@ -34,7 +36,11 @@ class TestSchemaConstants:
 
 class TestTableCreation:
 
-    async def test_all_tables_exist(self, schema_manager, db_pool):
+    async def test_all_tables_exist(
+        self,
+        schema_manager: Any,  # pylint: disable=unused-argument
+        db_pool: Any,
+    ) -> None:
         """Verify that all expected tables were created."""
         tables = [
             "conductor_version",
@@ -52,7 +58,7 @@ class TestTableCreation:
             )
             assert row is not None, f"Table '{table}' not found"
 
-    async def test_version_tracked(self, db_pool):
+    async def test_version_tracked(self, db_pool: Any) -> None:
         """The conductor_version table should record version 1."""
         row = await db_pool.fetchrow(
             "SELECT version FROM conductor_version"
@@ -67,7 +73,7 @@ class TestTableCreation:
 
 class TestConstraints:
 
-    async def test_task_status_check(self, db_pool):
+    async def test_task_status_check(self, db_pool: Any) -> None:
         """Inserting an invalid status should fail."""
         with pytest.raises(Exception):
             await db_pool.execute(
@@ -77,7 +83,7 @@ class TestConstraints:
                 "bad-status-task", "test", "invalid_status",
             )
 
-    async def test_task_priority_range(self, db_pool):
+    async def test_task_priority_range(self, db_pool: Any) -> None:
         """Priority outside the allowed range should fail."""
         with pytest.raises(Exception):
             await db_pool.execute(
@@ -87,7 +93,7 @@ class TestConstraints:
                 "bad-priority-task", "test", 200,
             )
 
-    async def test_valid_task_insert(self, db_pool):
+    async def test_valid_task_insert(self, db_pool: Any) -> None:
         """A valid task insert should succeed."""
         result = await db_pool.execute(
             "INSERT INTO conductor_tasks "
@@ -104,7 +110,7 @@ class TestConstraints:
 
 class TestIndexes:
 
-    async def _index_exists(self, db_pool, index_name: str) -> bool:
+    async def _index_exists(self, db_pool: Any, index_name: str) -> bool:
         row = await db_pool.fetchrow(
             "SELECT indexname FROM pg_indexes "
             "WHERE indexname = $1 AND tablename LIKE 'conductor_%'",
@@ -112,22 +118,22 @@ class TestIndexes:
         )
         return row is not None
 
-    async def test_tasks_status_index(self, db_pool):
+    async def test_tasks_status_index(self, db_pool: Any) -> None:
         assert await self._index_exists(db_pool, "idx_tasks_status")
 
-    async def test_tasks_polling_index(self, db_pool):
+    async def test_tasks_polling_index(self, db_pool: Any) -> None:
         assert await self._index_exists(db_pool, "idx_tasks_polling")
 
-    async def test_workers_heartbeat_index(self, db_pool):
+    async def test_workers_heartbeat_index(self, db_pool: Any) -> None:
         assert await self._index_exists(db_pool, "idx_workers_last_heartbeat")
 
-    async def test_retries_task_id_index(self, db_pool):
+    async def test_retries_task_id_index(self, db_pool: Any) -> None:
         assert await self._index_exists(db_pool, "idx_retries_task_id")
 
-    async def test_dead_letter_discarded_index(self, db_pool):
+    async def test_dead_letter_discarded_index(self, db_pool: Any) -> None:
         assert await self._index_exists(db_pool, "idx_dead_letter_discarded")
 
-    async def test_recurring_next_run_index(self, db_pool):
+    async def test_recurring_next_run_index(self, db_pool: Any) -> None:
         assert await self._index_exists(db_pool, "idx_recurring_next_run")
 
 
@@ -137,11 +143,11 @@ class TestIndexes:
 
 class TestIdempotentMigrations:
 
-    async def test_ensure_schema_twice(self, schema_manager):
+    async def test_ensure_schema_twice(self, schema_manager: Any) -> None:
         """Running ensure_schema twice should not raise."""
         await schema_manager.ensure_schema()  # second run
 
-    async def test_version_not_duplicated(self, db_pool):
+    async def test_version_not_duplicated(self, db_pool: Any) -> None:
         """Version row should not be duplicated after re-migration."""
         rows = await db_pool.fetch(
             "SELECT version FROM conductor_version"
@@ -155,7 +161,9 @@ class TestIdempotentMigrations:
 
 class TestRollback:
 
-    async def test_rollback_drops_tables(self, schema_manager, db_pool):
+    async def test_rollback_drops_tables(
+        self, schema_manager: Any, db_pool: Any
+    ) -> None:
         """Rollback to v0 should drop all conductor tables."""
         await schema_manager.rollback(target_version=0)
 

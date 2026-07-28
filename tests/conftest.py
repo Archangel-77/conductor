@@ -11,7 +11,12 @@ Divided into two tiers:
 from __future__ import annotations
 
 import os
-from typing import Any
+from collections.abc import AsyncGenerator
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from conductor.db.connection import DatabasePool
+    from conductor.db.schema import SchemaManager
 
 import pytest
 import pytest_asyncio
@@ -112,7 +117,8 @@ def sample_retry_record_dict() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 @pytest_asyncio.fixture(scope="session")
-async def db_pool():
+async def db_pool(  # noqa: N802  # pylint: disable=redefined-outer-name
+) -> AsyncGenerator[Any, None]:
     """Create a :class:`DatabasePool` connected to the test database.
 
     Skips the test if the database is not running.
@@ -141,7 +147,9 @@ async def db_pool():
 
 
 @pytest_asyncio.fixture(scope="session")
-async def schema_manager(db_pool):
+async def schema_manager(  # noqa: N802  # pylint: disable=redefined-outer-name
+    db_pool: DatabasePool,
+) -> SchemaManager:
     """Create a :class:`SchemaManager` and run migrations."""
     from conductor.db.schema import SchemaManager
 
@@ -151,18 +159,17 @@ async def schema_manager(db_pool):
 
 
 @pytest_asyncio.fixture
-async def auto_cleanup(db_pool):
+async def auto_cleanup(  # noqa: N802  # pylint: disable=redefined-outer-name
+    db_pool: DatabasePool,
+) -> AsyncGenerator[None, None]:
     """Clean all rows from conductor tables after each test.
 
     Tests that need per-test isolation should request this fixture explicitly.
     """
-    from conductor.db.queries import QueryBuilder
-
     yield
 
     if db_pool.is_connected:
-        qb = QueryBuilder(db_pool)
-        await qb._pool.execute("DELETE FROM conductor_retries")
-        await qb._pool.execute("DELETE FROM conductor_dead_letter")
-        await qb._pool.execute("DELETE FROM conductor_tasks")
-        await qb._pool.execute("DELETE FROM conductor_workers")
+        await db_pool.execute("DELETE FROM conductor_retries")
+        await db_pool.execute("DELETE FROM conductor_dead_letter")
+        await db_pool.execute("DELETE FROM conductor_tasks")
+        await db_pool.execute("DELETE FROM conductor_workers")

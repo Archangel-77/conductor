@@ -118,44 +118,44 @@
   - [x] Hostname/PID utilities for worker identification — in `conductor/core/models.py`
 
 #### Unit Tests (Sprint 1)
-- [ ] Create test fixtures
-  - [ ] `tests/conftest.py` with database setup/teardown
-  - [ ] Test database URL configuration
-  - [ ] Database initialization fixture
-  - [ ] Auto-cleanup after each test
+- [x] Create test fixtures
+  - [x] `tests/conftest.py` with database setup/teardown
+  - [x] Test database URL configuration
+  - [x] Database initialization fixture
+  - [x] Auto-cleanup after each test
 
-- [ ] Write database tests (`tests/unit/test_db_connection.py`)
-  - [ ] Test connection pool creation
-  - [ ] Test health check query
-  - [ ] Test connection retry on failure
-  - [ ] Test connection timeout
-  - [ ] Test concurrent connections
+- [x] Write database tests (`tests/unit/test_db_connection.py`)
+  - [x] Test connection pool creation
+  - [x] Test health check query
+  - [x] Test connection retry on failure
+  - [x] Test connection timeout
+  - [x] Test concurrent connections
 
-- [ ] Write schema tests (`tests/unit/test_db_schema.py`)
-  - [ ] Test table creation
-  - [ ] Test index creation
-  - [ ] Test constraint enforcement
-  - [ ] Test idempotent migrations
-  - [ ] Test schema version tracking
+- [x] Write schema tests (`tests/unit/test_db_schema.py`)
+  - [x] Test table creation
+  - [x] Test index creation
+  - [x] Test constraint enforcement
+  - [x] Test idempotent migrations
+  - [x] Test schema version tracking
 
-- [ ] Write model tests (`tests/unit/test_models.py`)
-  - [ ] Test Task creation and validation
-  - [ ] Test RetryPolicy validation
-  - [ ] Test JSON serialization
-  - [ ] Test enum values
-  - [ ] Test default values
+- [x] Write model tests (`tests/unit/test_models.py`)
+  - [x] Test Task creation and validation
+  - [x] Test RetryPolicy validation
+  - [x] Test JSON serialization
+  - [x] Test enum values
+  - [x] Test default values
 
-- [ ] Write utility tests (`tests/unit/test_utils.py`)
-  - [ ] Test ID generation (uniqueness)
-  - [ ] Test serialization/deserialization
-  - [ ] Test timestamp handling
+- [x] Write utility tests (`tests/unit/test_utils.py`)
+  - [x] Test ID generation (uniqueness)
+  - [x] Test serialization/deserialization
+  - [x] Test timestamp handling
 
 **Acceptance Criteria**:
-- [ ] Database tables created without errors
-- [ ] Connection pool handles 10+ concurrent connections
-- [ ] Migrations run idempotently
-- [ ] All models have type hints and validation
-- [ ] Database module has 80%+ test coverage
+- [x] Database tables created without errors
+- [x] Connection pool handles 10+ concurrent connections
+- [x] Migrations run idempotently
+- [x] All models have type hints and validation
+- [x] Database module has 80%+ test coverage (when integration tests run)
 
 ---
 
