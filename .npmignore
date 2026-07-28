@@ -1,0 +1,27 @@
+# This file prevents npm-related files from being included in PyPI package
+# (npm is not used; this is for safety)
+
+.git/
+.gitignore
+.github/
+.env
+.env.example
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.mypy_cache/
+.pytest_cache/
+htmlcov/
+.coverage
+docs/
+examples/
+tests/
+TODO.md
+PLAN.md
+plan.pdf
+Dockerfile
+docker-compose*.yml

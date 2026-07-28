@@ -1,0 +1,84 @@
+[build-system]
+requires = ["setuptools>=68.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "conductor-task-queue"
+version = "0.1.0"
+description = "Lightweight async task queue for Python (PostgreSQL-backed, no Redis)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "Panagiotis Panageas" },
+]
+keywords = ["task", "queue", "async", "postgresql", "worker", "background", "jobs"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Distributed Computing",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+dependencies = [
+    "asyncpg>=0.29.0",
+    "aiohttp>=3.9.0",
+    "pydantic>=2.0.0",
+    "prometheus-client>=0.19.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "black>=24.0.0",
+    "mypy>=1.8.0",
+    "flake8>=7.0.0",
+]
+
+[project.urls]
+"Bug Tracker" = "https://github.com/Archangel-77/Conductor/issues"
+"Source Code" = "https://github.com/Archangel-77/Conductor"
+
+[tool.setuptools.packages.find]
+exclude = ["tests*", "examples*", "docs*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-v --cov=conductor --cov-report=term-missing --cov-report=html"
+markers = [
+    "unit: Unit tests (fast, no external dependencies)",
+    "integration: Integration tests (require database)",
+    "e2e: End-to-end tests (full workflow)",
+    "perf: Performance benchmarks",
+]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+show_error_codes = true
+warn_unused_ignores = true
+exclude = ["tests/", "examples/", "docs/"]
+
+[tool.black]
+line_length = 100
+target_version = ["py311"]
+
+[tool.coverage.run]
+source = ["conductor"]
+omit = ["tests/*", "*/__init__.py"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]
