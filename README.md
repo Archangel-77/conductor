@@ -1318,8 +1318,6 @@ black src/ tests/
 - **Documentation**: [docs.conductor.sh](https://docs.conductor.sh)
 - **Issues & Bugs**: [GitHub Issues](https://github.com/Archangel-77/Conductor/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/Archangel-77/Conductor/discussions)
-- **Email**: [support@conductor.sh](mailto:support@conductor.sh)
-- **Twitter**: [@ConductorTaskQ](https://twitter.com/conductortaskq)
 
 ---
 
