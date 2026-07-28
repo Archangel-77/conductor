@@ -13,6 +13,29 @@ Conductor orchestrates reliable, distributed task execution with exactly-once se
 
 ---
 
+## Local Development
+
+```bash
+# 1. Start PostgreSQL
+docker compose up -d
+
+# 2. Copy and configure environment
+cp .env.example .env
+
+# 3. Create virtual environment & install
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+
+# 4. Run the schema migration (creates tables)
+python -c "import asyncio; from conductor.db.connection import DatabasePool; from conductor.db.schema import SchemaManager; async def main(): async with DatabasePool(dsn='postgresql://conductor:conductor@localhost:5432/conductor') as pool: await SchemaManager(pool).ensure_schema(); print('Schema ready!'); asyncio.run(main())"
+
+# 5. Run tests
+pytest
+```
+
+---
+
 ## Table of Contents
 
 - [Why Conductor?](#why-conductor)

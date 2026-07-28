@@ -1,0 +1,32 @@
+# ──────────────────────────────────────────────────────────
+# Conductor — Development Environment
+# ──────────────────────────────────────────────────────────
+# Start with:
+#   docker compose up -d
+#
+# Stop and clean up:
+#   docker compose down -v
+# ──────────────────────────────────────────────────────────
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: conductor-pg
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: conductor
+      POSTGRES_PASSWORD: conductor
+      POSTGRES_DB: conductor
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U conductor -d conductor"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  pgdata:
