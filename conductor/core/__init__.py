@@ -15,12 +15,14 @@ from conductor.core.models import (
     RetryPolicy,
 )
 
+from conductor.core.queue import TaskQueue
+
 # The following will be uncommented as those modules are implemented:
-# from conductor.core.queue import TaskQueue
 # from conductor.core.worker import Worker
 
 __all__: list[str] = [
     "Task",
+    "TaskQueue",
     "TaskStatus",
     "RetryRecord",
     "WorkerInfo",
@@ -28,6 +30,5 @@ __all__: list[str] = [
     "WorkerStatus",
     "BackoffStrategyType",
     "RetryPolicy",
-    # "TaskQueue",
     # "Worker",
 ]

@@ -15,6 +15,9 @@ import pytest
 from conductor.core.models import (
     BackoffStrategyType,
     DLQTask,
+    ExponentialBackoff,
+    FixedBackoff,
+    LinearBackoff,
     RetryPolicy,
     RetryRecord,
     Task,
@@ -292,3 +295,81 @@ class TestDLQTask:
         d2 = DLQTask.from_dict(d1.to_dict())
         assert d1.task_id == d2.task_id
         assert d1.attempts == d2.attempts
+
+
+# ===================================================================
+# Backoff Strategy classes
+# ===================================================================
+
+class TestExponentialBackoff:
+
+    def test_defaults(self) -> None:
+        b = ExponentialBackoff()
+        assert b.initial_delay == 1.0
+        assert b.max_delay == 3600.0
+
+    def test_calculate_delay_attempt_zero(self) -> None:
+        b = ExponentialBackoff(initial_delay=1.0)
+        assert b.calculate_delay(0) == 1.0
+
+    def test_calculate_delay_attempt_one(self) -> None:
+        b = ExponentialBackoff(initial_delay=1.0)
+        assert b.calculate_delay(1) == 2.0
+
+    def test_calculate_delay_capped(self) -> None:
+        b = ExponentialBackoff(initial_delay=1.0, max_delay=10.0)
+        # 1.0 * (2^10) = 1024, capped at 10
+        assert b.calculate_delay(10) == 10.0
+
+    def test_calculate_delay_custom_initial(self) -> None:
+        b = ExponentialBackoff(initial_delay=2.0, max_delay=100.0)
+        # 2.0 * (2^3) = 16.0
+        assert b.calculate_delay(3) == 16.0
+
+
+class TestLinearBackoff:
+
+    def test_defaults(self) -> None:
+        b = LinearBackoff()
+        assert b.initial_delay == 1.0
+        assert b.max_delay == 3600.0
+
+    def test_calculate_delay_attempt_zero(self) -> None:
+        b = LinearBackoff(initial_delay=2.0)
+        # 2.0 + (2.0 * 0) = 2.0
+        assert b.calculate_delay(0) == 2.0
+
+    def test_calculate_delay_attempt_one(self) -> None:
+        b = LinearBackoff(initial_delay=2.0)
+        # 2.0 + (2.0 * 1) = 4.0
+        assert b.calculate_delay(1) == 4.0
+
+    def test_calculate_delay_capped(self) -> None:
+        b = LinearBackoff(initial_delay=5.0, max_delay=12.0)
+        # 5.0 + (5.0 * 2) = 15.0, capped at 12.0
+        assert b.calculate_delay(2) == 12.0
+
+    def test_calculate_delay_large_attempt(self) -> None:
+        b = LinearBackoff(initial_delay=0.5, max_delay=100.0)
+        # 0.5 + (0.5 * 10) = 5.5
+        assert b.calculate_delay(10) == 5.5
+
+
+class TestFixedBackoff:
+
+    def test_defaults(self) -> None:
+        b = FixedBackoff()
+        assert b.initial_delay == 1.0
+        assert b.max_delay == 3600.0
+
+    def test_calculate_delay_always_initial(self) -> None:
+        b = FixedBackoff(initial_delay=5.0)
+        assert b.calculate_delay(0) == 5.0
+        assert b.calculate_delay(1) == 5.0
+        assert b.calculate_delay(99) == 5.0
+
+    def test_calculate_delay_capped(self) -> None:
+        b = FixedBackoff(initial_delay=50.0, max_delay=10.0)
+        # initial_delay (50) > max_delay (10), so capped
+        assert b.calculate_delay(0) == 10.0
+        assert b.calculate_delay(5) == 10.0
