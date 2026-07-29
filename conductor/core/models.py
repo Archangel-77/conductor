@@ -18,10 +18,10 @@ from typing import Any, Optional, cast
 
 from conductor.exceptions import RetryPolicyError, TaskError
 
-
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
+
 
 class TaskStatus(str, Enum):
     """Possible states of a task through its lifecycle."""
@@ -61,6 +61,7 @@ class BackoffStrategyType(str, Enum):
 # ---------------------------------------------------------------------------
 # Dataclasses
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class RetryPolicy:
@@ -105,9 +106,7 @@ class RetryPolicy:
         """Deserialize from a dictionary."""
         return cls(
             max_retries=data.get("max_retries", 3),
-            backoff_strategy=BackoffStrategyType(
-                data.get("backoff_strategy", "exponential")
-            ),
+            backoff_strategy=BackoffStrategyType(data.get("backoff_strategy", "exponential")),
             initial_delay=float(data.get("initial_delay", 1.0)),
             max_delay=float(data.get("max_delay", 3600.0)),
         )
@@ -156,9 +155,7 @@ class Task:
     error_message: Optional[str] = None
     """Error message if the task failed."""
 
-    created_at: datetime = field(
-        default_factory=lambda: datetime.now(timezone.utc)
-    )
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     """Timestamp when the task was created."""
 
     started_at: Optional[datetime] = None
@@ -173,9 +170,7 @@ class Task:
         result["status"] = self.status.value
         result["retry_policy"] = self.retry_policy.to_dict()
         # Convert datetimes to ISO strings
-        datetime_fields = (
-            "scheduled_for", "created_at", "started_at", "completed_at"
-        )
+        datetime_fields = ("scheduled_for", "created_at", "started_at", "completed_at")
         for field_name in datetime_fields:
             val = getattr(self, field_name)
             result[field_name] = val.isoformat() if val else None
@@ -186,13 +181,9 @@ class Task:
         """Deserialize from a dictionary."""
         payload = data.copy()
         payload["status"] = TaskStatus(payload.get("status", "pending"))
-        payload["retry_policy"] = RetryPolicy.from_dict(
-            payload.get("retry_policy", {})
-        )
+        payload["retry_policy"] = RetryPolicy.from_dict(payload.get("retry_policy", {}))
         # Parse datetime fields
-        datetime_fields = (
-            "scheduled_for", "created_at", "started_at", "completed_at"
-        )
+        datetime_fields = ("scheduled_for", "created_at", "started_at", "completed_at")
         for field_name in datetime_fields:
             val = payload.get(field_name)
             if isinstance(val, str):
@@ -231,9 +222,7 @@ class WorkerInfo:
     last_heartbeat: Optional[datetime] = None
     """Timestamp of the last heartbeat received."""
 
-    started_at: datetime = field(
-        default_factory=lambda: datetime.now(timezone.utc)
-    )
+    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     """Timestamp when the worker started."""
 
     def to_dict(self) -> dict[str, Any]:
@@ -276,9 +265,7 @@ class RetryRecord:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     """Unique record identifier."""
 
-    created_at: datetime = field(
-        default_factory=lambda: datetime.now(timezone.utc)
-    )
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     """When this record was created."""
 
     def to_dict(self) -> dict[str, Any]:
@@ -323,9 +310,7 @@ class DLQTask:
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
     """The retry policy that was applied."""
 
-    moved_at: datetime = field(
-        default_factory=lambda: datetime.now(timezone.utc)
-    )
+    moved_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     """When the task was moved to the DLQ."""
 
     discarded: bool = False
@@ -350,9 +335,7 @@ class DLQTask:
     def from_dict(cls, data: dict[str, Any]) -> DLQTask:
         """Deserialize from a dictionary."""
         payload = data.copy()
-        payload["retry_policy"] = RetryPolicy.from_dict(
-            payload.get("retry_policy", {})
-        )
+        payload["retry_policy"] = RetryPolicy.from_dict(payload.get("retry_policy", {}))
         for field_name in ("moved_at", "discarded_at"):
             val = payload.get(field_name)
             if isinstance(val, str):
@@ -363,6 +346,7 @@ class DLQTask:
 # ---------------------------------------------------------------------------
 # Utility helpers
 # ---------------------------------------------------------------------------
+
 
 def generate_task_id() -> str:
     """Generate a unique task identifier (UUID v4)."""
@@ -384,9 +368,7 @@ def deserialize_payload(data: str) -> dict[str, Any]:
     try:
         return cast("dict[str, Any]", json.loads(data))
     except (json.JSONDecodeError, TypeError) as exc:
-        raise TaskError(
-            f"Failed to deserialize payload: {exc}"
-        ) from exc
+        raise TaskError(f"Failed to deserialize payload: {exc}") from exc
 
 
 def generate_correlation_id() -> str:
@@ -416,19 +398,18 @@ def get_worker_label() -> str:
 # Backoff strategy stubs (will be fleshed out in Sprint 4)
 # ---------------------------------------------------------------------------
 
+
 class ExponentialBackoff:
     """Exponential backoff: delay = initial_delay * (2 ^ attempt),
     capped at max_delay."""
 
-    def __init__(
-        self, initial_delay: float = 1.0, max_delay: float = 3600.0
-    ) -> None:
+    def __init__(self, initial_delay: float = 1.0, max_delay: float = 3600.0) -> None:
         self.initial_delay = initial_delay
         self.max_delay = max_delay
 
     def calculate_delay(self, attempt: int) -> float:
         """Return the delay in seconds for the given *attempt* number."""
-        delay = self.initial_delay * float(2 ** attempt)
+        delay = self.initial_delay * float(2**attempt)
         return min(delay, self.max_delay)
 
 
@@ -436,9 +417,7 @@ class LinearBackoff:
     """Linear backoff: delay = initial_delay + (initial_delay * attempt),
     capped."""
 
-    def __init__(
-        self, initial_delay: float = 1.0, max_delay: float = 3600.0
-    ) -> None:
+    def __init__(self, initial_delay: float = 1.0, max_delay: float = 3600.0) -> None:
         self.initial_delay = initial_delay
         self.max_delay = max_delay
 
@@ -451,9 +430,7 @@ class LinearBackoff:
 class FixedBackoff:
     """Fixed backoff: always returns the same delay."""
 
-    def __init__(
-        self, initial_delay: float = 1.0, max_delay: float = 3600.0
-    ) -> None:
+    def __init__(self, initial_delay: float = 1.0, max_delay: float = 3600.0) -> None:
         self.initial_delay = initial_delay
         self.max_delay = max_delay
 

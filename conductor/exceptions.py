@@ -5,6 +5,8 @@ All exceptions inherit from a base ``ConductorException`` so callers can
 catch a single type when needed.
 """
 
+from __future__ import annotations
+
 
 class ConductorException(Exception):
     """Base exception for all Conductor errors."""

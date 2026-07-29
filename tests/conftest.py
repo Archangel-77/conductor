@@ -7,6 +7,7 @@ Divided into two tiers:
 - **Integration-test fixtures** – require a running PostgreSQL instance
   (skipped automatically if the database is unavailable)
 """
+
 # pylint: disable=import-outside-toplevel
 
 from __future__ import annotations
@@ -43,15 +44,13 @@ def db_available() -> bool:
     looks reasonable.  Individual fixtures will fail with a clear
     skip message when the database is not running.
     """
-    return bool(
-        TEST_DATABASE_URL
-        and TEST_DATABASE_URL.startswith("postgresql")
-    )
+    return bool(TEST_DATABASE_URL and TEST_DATABASE_URL.startswith("postgresql"))
 
 
 # ---------------------------------------------------------------------------
 # Unit-test fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def sample_task_dict() -> dict[str, Any]:
@@ -117,9 +116,11 @@ def sample_retry_record_dict() -> dict[str, Any]:
 # Integration-test fixtures (database required)
 # ---------------------------------------------------------------------------
 
+
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
-async def db_pool(  # noqa: N802  # pylint: disable=redefined-outer-name
-) -> AsyncGenerator[Any, None]:
+async def db_pool() -> (  # noqa: N802  # pylint: disable=redefined-outer-name
+    AsyncGenerator[Any, None]
+):
     """Create a :class:`DatabasePool` connected to the test database.
 
     Skips the test if the database is not running.

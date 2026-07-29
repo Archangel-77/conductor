@@ -21,10 +21,10 @@ from conductor.core.models import (
 from conductor.core.queue import TaskQueue, _task_to_db_dict
 from conductor.exceptions import TaskError
 
-
 # ===================================================================
 # Fixtures
 # ===================================================================
+
 
 @pytest.fixture
 def mock_pool() -> MagicMock:
@@ -82,6 +82,7 @@ def queue(mock_pool: Any, mock_queries: Any) -> TaskQueue:
 # Construction & lifecycle
 # ===================================================================
 
+
 class TestTaskQueueConstruction:
 
     def test_defaults(self) -> None:
@@ -109,9 +110,7 @@ class TestTaskQueueConstruction:
     @pytest.mark.asyncio
     async def test_connect_and_disconnect(self, mock_pool: Any) -> None:
         """connect() should create pool and schema."""
-        with patch(
-            "conductor.core.queue.SchemaManager"
-        ) as mock_sm_cls:
+        with patch("conductor.core.queue.SchemaManager") as mock_sm_cls:
             mock_sm = MagicMock()
             mock_sm.ensure_schema = AsyncMock()
             mock_sm_cls.return_value = mock_sm
@@ -130,9 +129,7 @@ class TestTaskQueueConstruction:
     @pytest.mark.asyncio
     async def test_async_context_manager(self, mock_pool: Any) -> None:
         """async with should connect and disconnect."""
-        with patch(
-            "conductor.core.queue.SchemaManager"
-        ) as mock_sm_cls:
+        with patch("conductor.core.queue.SchemaManager") as mock_sm_cls:
             mock_sm = MagicMock()
             mock_sm.ensure_schema = AsyncMock()
             mock_sm_cls.return_value = mock_sm
@@ -149,6 +146,7 @@ class TestTaskQueueConstruction:
 # ===================================================================
 # submit()
 # ===================================================================
+
 
 class TestSubmit:
 
@@ -170,9 +168,7 @@ class TestSubmit:
         assert call_kwargs["max_retries"] == 3
 
     @pytest.mark.asyncio
-    async def test_submit_with_retry_policy(
-        self, queue: Any, mock_queries: Any
-    ) -> None:
+    async def test_submit_with_retry_policy(self, queue: Any, mock_queries: Any) -> None:
         """Custom retry policy should be reflected in the insert dict."""
         mock_queries.insert_task.return_value = "tid-1"
         rp = RetryPolicy(max_retries=5, backoff_strategy=BackoffStrategyType.FIXED)
@@ -184,9 +180,7 @@ class TestSubmit:
         assert call_kwargs["retry_policy"]["backoff_strategy"] == "fixed"
 
     @pytest.mark.asyncio
-    async def test_submit_with_scheduled_for(
-        self, queue: Any, mock_queries: Any
-    ) -> None:
+    async def test_submit_with_scheduled_for(self, queue: Any, mock_queries: Any) -> None:
         """Scheduled-for should be passed through."""
         mock_queries.insert_task.return_value = "tid-sched"
         sched = datetime(2026, 12, 25, 10, 0, 0, tzinfo=timezone.utc)
@@ -197,9 +191,7 @@ class TestSubmit:
         assert call_kwargs["scheduled_for"] == sched
 
     @pytest.mark.asyncio
-    async def test_submit_with_custom_task_id(
-        self, queue: Any, mock_queries: Any
-    ) -> None:
+    async def test_submit_with_custom_task_id(self, queue: Any, mock_queries: Any) -> None:
         """Explicit task_id should be honored."""
         mock_queries.insert_task.return_value = "my-custom-id"
 
@@ -222,9 +214,7 @@ class TestSubmit:
             await queue.submit("test", "not-a-dict")
 
     @pytest.mark.asyncio
-    async def test_submit_with_route_and_priority(
-        self, queue: Any, mock_queries: Any
-    ) -> None:
+    async def test_submit_with_route_and_priority(self, queue: Any, mock_queries: Any) -> None:
         """Route and priority should be passed to the query."""
         mock_queries.insert_task.return_value = "tid-rp"
 
@@ -246,12 +236,11 @@ class TestSubmit:
 # submit_many()
 # ===================================================================
 
+
 class TestSubmitMany:
 
     @pytest.mark.asyncio
-    async def test_submit_many(
-        self, queue: Any, mock_queries: Any
-    ) -> None:
+    async def test_submit_many(self, queue: Any, mock_queries: Any) -> None:
         """submit_many should insert all tasks."""
         mock_queries.insert_task.side_effect = ["id-1", "id-2", "id-3"]
 
@@ -266,9 +255,7 @@ class TestSubmitMany:
         assert mock_queries.insert_task.await_count == 3
 
     @pytest.mark.asyncio
-    async def test_submit_many_empty_type(
-        self, queue: Any
-    ) -> None:
+    async def test_submit_many_empty_type(self, queue: Any) -> None:
         with pytest.raises(ValueError, match="task_type"):
             await queue.submit_many([("", {})])
 
@@ -277,12 +264,11 @@ class TestSubmitMany:
 # Task queries
 # ===================================================================
 
+
 class TestGetTask:
 
     @pytest.mark.asyncio
-    async def test_get_task_found(
-        self, queue: Any, mock_queries: Any
-    ) -> None:
+    async def test_get_task_found(self, queue: Any, mock_queries: Any) -> None:
         """get_task should return a Task when found."""
         mock_queries.select_task.return_value = {
             "task_id": "tid-1",
@@ -310,9 +296,7 @@ class TestGetTask:
         assert task.status == TaskStatus.PENDING
 
     @pytest.mark.asyncio
-    async def test_get_task_not_found(
-        self, queue: Any, mock_queries: Any
-    ) -> None:
+    async def test_get_task_not_found(self, queue: Any, mock_queries: Any) -> None:
         """get_task should return None when not found."""
         mock_queries.select_task.return_value = None
 
@@ -329,30 +313,44 @@ class TestGetTask:
 class TestListPendingTasks:
 
     @pytest.mark.asyncio
-    async def test_list_pending(
-        self, queue: Any, mock_queries: Any
-    ) -> None:
+    async def test_list_pending(self, queue: Any, mock_queries: Any) -> None:
         """list_pending_tasks should return Task objects."""
         mock_queries.select_pending_tasks.return_value = [
             {
-                "task_id": "t1", "task_type": "email",
-                "payload": {}, "status": "pending",
-                "priority": 0, "route": "default", "attempt": 0,
-                "max_retries": 3, "retry_policy": {},
-                "scheduled_for": None, "worker_id": None,
-                "result": None, "error_message": None,
+                "task_id": "t1",
+                "task_type": "email",
+                "payload": {},
+                "status": "pending",
+                "priority": 0,
+                "route": "default",
+                "attempt": 0,
+                "max_retries": 3,
+                "retry_policy": {},
+                "scheduled_for": None,
+                "worker_id": None,
+                "result": None,
+                "error_message": None,
                 "created_at": datetime.now(timezone.utc),
-                "started_at": None, "completed_at": None,
+                "started_at": None,
+                "completed_at": None,
             },
             {
-                "task_id": "t2", "task_type": "sms",
-                "payload": {}, "status": "pending",
-                "priority": 5, "route": "default", "attempt": 0,
-                "max_retries": 3, "retry_policy": {},
-                "scheduled_for": None, "worker_id": None,
-                "result": None, "error_message": None,
+                "task_id": "t2",
+                "task_type": "sms",
+                "payload": {},
+                "status": "pending",
+                "priority": 5,
+                "route": "default",
+                "attempt": 0,
+                "max_retries": 3,
+                "retry_policy": {},
+                "scheduled_for": None,
+                "worker_id": None,
+                "result": None,
+                "error_message": None,
                 "created_at": datetime.now(timezone.utc),
-                "started_at": None, "completed_at": None,
+                "started_at": None,
+                "completed_at": None,
             },
         ]
 
@@ -362,13 +360,12 @@ class TestListPendingTasks:
         assert tasks[0].task_id == "t1"
         assert tasks[1].task_type == "sms"
         mock_queries.select_pending_tasks.assert_awaited_with(
-            limit=5, offset=0,
+            limit=5,
+            offset=0,
         )
 
     @pytest.mark.asyncio
-    async def test_list_pending_empty(
-        self, queue: Any, mock_queries: Any
-    ) -> None:
+    async def test_list_pending_empty(self, queue: Any, mock_queries: Any) -> None:
         """list_pending_tasks should return empty list when no tasks."""
         mock_queries.select_pending_tasks.return_value = []
         tasks = await queue.list_pending_tasks()
@@ -378,17 +375,22 @@ class TestListPendingTasks:
 class TestListCompletedTasks:
 
     @pytest.mark.asyncio
-    async def test_list_completed(
-        self, queue: Any, mock_queries: Any
-    ) -> None:
+    async def test_list_completed(self, queue: Any, mock_queries: Any) -> None:
         mock_queries.select_tasks_by_status.return_value = [
             {
-                "task_id": "t1", "task_type": "email",
-                "payload": {"result": "ok"}, "status": "completed",
-                "priority": 0, "route": "default", "attempt": 0,
-                "max_retries": 3, "retry_policy": {},
-                "scheduled_for": None, "worker_id": "w1",
-                "result": {"output": "done"}, "error_message": None,
+                "task_id": "t1",
+                "task_type": "email",
+                "payload": {"result": "ok"},
+                "status": "completed",
+                "priority": 0,
+                "route": "default",
+                "attempt": 0,
+                "max_retries": 3,
+                "retry_policy": {},
+                "scheduled_for": None,
+                "worker_id": "w1",
+                "result": {"output": "done"},
+                "error_message": None,
                 "created_at": datetime.now(timezone.utc),
                 "started_at": datetime.now(timezone.utc),
                 "completed_at": datetime.now(timezone.utc),
@@ -399,23 +401,29 @@ class TestListCompletedTasks:
         assert len(tasks) == 1
         assert tasks[0].status == TaskStatus.COMPLETED
         mock_queries.select_tasks_by_status.assert_awaited_with(
-            "completed", limit=10, offset=0,
+            "completed",
+            limit=10,
+            offset=0,
         )
 
 
 class TestListFailedTasks:
 
     @pytest.mark.asyncio
-    async def test_list_failed(
-        self, queue: Any, mock_queries: Any
-    ) -> None:
+    async def test_list_failed(self, queue: Any, mock_queries: Any) -> None:
         mock_queries.select_tasks_by_status.return_value = [
             {
-                "task_id": "t1", "task_type": "email",
-                "payload": {}, "status": "failed",
-                "priority": 0, "route": "default", "attempt": 3,
-                "max_retries": 3, "retry_policy": {},
-                "scheduled_for": None, "worker_id": "w1",
+                "task_id": "t1",
+                "task_type": "email",
+                "payload": {},
+                "status": "failed",
+                "priority": 0,
+                "route": "default",
+                "attempt": 3,
+                "max_retries": 3,
+                "retry_policy": {},
+                "scheduled_for": None,
+                "worker_id": "w1",
                 "result": None,
                 "error_message": "Connection timeout",
                 "created_at": datetime.now(timezone.utc),
@@ -429,7 +437,9 @@ class TestListFailedTasks:
         assert tasks[0].status == TaskStatus.FAILED
         assert tasks[0].error_message == "Connection timeout"
         mock_queries.select_tasks_by_status.assert_awaited_with(
-            "failed", limit=5, offset=2,
+            "failed",
+            limit=5,
+            offset=2,
         )
 
 
@@ -447,6 +457,7 @@ class TestCountTasksByStatus:
 # ===================================================================
 # _task_to_db_dict helper
 # ===================================================================
+
 
 class TestTaskToDbDict:
 

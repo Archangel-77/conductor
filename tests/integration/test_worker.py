@@ -18,6 +18,7 @@ Tests cover:
 - Multiple workers polling the same queue
 - Worker status reporting
 """
+
 # pylint: disable=missing-class-docstring,import-outside-toplevel,protected-access
 
 # pylint: disable=missing-class-docstring,import-outside-toplevel
@@ -44,6 +45,7 @@ pytestmark = [
 # ===================================================================
 # Fixtures
 # ===================================================================
+
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module", name="task_queue")
 async def _task_queue_factory() -> Any:
@@ -89,15 +91,18 @@ async def _cleanup_test_data(task_queue: Any) -> Any:
 # Helper: DB URL
 # ===================================================================
 
+
 def _db_url() -> str:
     """Return the test database URL."""
     from tests.conftest import TEST_DATABASE_URL
+
     return TEST_DATABASE_URL
 
 
 # ===================================================================
 # Tests
 # ===================================================================
+
 
 class TestWorkerStartupAndRegistration:
 
@@ -198,7 +203,9 @@ class TestTaskPolling:
     async def test_poll_returns_pending_tasks(self, task_queue: Any) -> None:
         """Pending tasks should be found by polling."""
         task_id = await task_queue.submit(
-            "poll_test", {"data": 1}, route="default",
+            "poll_test",
+            {"data": 1},
+            route="default",
         )
 
         async with Worker(
@@ -209,6 +216,7 @@ class TestTaskPolling:
             pool_max_size=2,
             pool_timeout=5.0,
         ) as worker:
+
             @worker.task("poll_test")
             async def handler(_payload: dict[str, Any]) -> dict[str, Any]:
                 return {"ok": True}
@@ -222,7 +230,9 @@ class TestTaskPolling:
     async def test_poll_filters_by_route(self, task_queue: Any) -> None:
         """Tasks on a different route should not be polled."""
         task_id = await task_queue.submit(
-            "route_test", {}, route="other_route",
+            "route_test",
+            {},
+            route="other_route",
         )
 
         async with Worker(
@@ -233,6 +243,7 @@ class TestTaskPolling:
             pool_max_size=2,
             pool_timeout=5.0,
         ) as worker:
+
             @worker.task("route_test")
             async def handler(_payload: dict[str, Any]) -> dict[str, Any]:
                 return {"ok": True}
@@ -256,6 +267,7 @@ class TestTaskPolling:
             pool_max_size=2,
             pool_timeout=5.0,
         ) as worker:
+
             @worker.task("multi_a")
             async def handler_a(_payload: dict[str, Any]) -> dict[str, Any]:
                 return {"ok": True}
@@ -286,7 +298,8 @@ class TestTaskPolling:
         """Tasks scheduled far in the future should not be polled."""
         future = utc_now() + timedelta(days=365)
         task_id = await task_queue.submit(
-            "future_task", {},
+            "future_task",
+            {},
             scheduled_for=future,
         )
 
@@ -297,6 +310,7 @@ class TestTaskPolling:
             pool_max_size=2,
             pool_timeout=5.0,
         ) as worker:
+
             @worker.task("future_task")
             async def handler(_payload: dict[str, Any]) -> dict[str, Any]:
                 return {"ok": True}
@@ -321,6 +335,7 @@ class TestTaskExecution:
             pool_max_size=2,
             pool_timeout=5.0,
         ) as worker:
+
             @worker.task("exec_ok")
             async def handler(payload: dict[str, Any]) -> dict[str, Any]:
                 return {"result": payload["x"] * 2}
@@ -338,8 +353,10 @@ class TestTaskExecution:
     async def test_execute_handler_not_found(self, task_queue: Any) -> None:
         """A task with no registered handler should fail."""
         from conductor.core.models import RetryPolicy
+
         task_id = await task_queue.submit(
-            "no_handler", {},
+            "no_handler",
+            {},
             retry_policy=RetryPolicy(max_retries=0),
         )
 
@@ -361,8 +378,10 @@ class TestTaskExecution:
     async def test_execute_handler_raises(self, task_queue: Any) -> None:
         """A handler that raises should result in a failed task."""
         from conductor.core.models import RetryPolicy
+
         task_id = await task_queue.submit(
-            "failing", {"message": "boom"},
+            "failing",
+            {"message": "boom"},
             retry_policy=RetryPolicy(max_retries=0),
         )
 
@@ -373,6 +392,7 @@ class TestTaskExecution:
             pool_max_size=2,
             pool_timeout=5.0,
         ) as worker:
+
             @worker.task("failing")
             async def handler(_payload: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError("Boom!")
@@ -393,6 +413,7 @@ class TestTaskExecution:
             pool_max_size=2,
             pool_timeout=5.0,
         ) as worker:
+
             @worker.task("good")
             async def good_handler(_payload: dict[str, Any]) -> dict[str, Any]:
                 return {"ok": True}
@@ -449,7 +470,8 @@ class TestRetryAndDLQ:
         assert task.error_message is not None
 
     async def test_task_moved_to_dlq_after_exhausted_retries(
-        self, task_queue: Any,
+        self,
+        task_queue: Any,
     ) -> None:
         """Task should move to DLQ after all retry attempts exhausted."""
         from conductor.core.models import RetryPolicy
@@ -464,6 +486,7 @@ class TestRetryAndDLQ:
             pool_max_size=2,
             pool_timeout=5.0,
         ) as worker:
+
             @worker.task("dlq_bound")
             async def handler(_payload: dict[str, Any]) -> dict[str, Any]:
                 raise RuntimeError("Always fails")
@@ -479,7 +502,8 @@ class TestRetryAndDLQ:
         assert dlq_row["task_id"] == task_id
 
     async def test_retry_with_zero_max_retries_goes_to_dlq(
-        self, task_queue: Any,
+        self,
+        task_queue: Any,
     ) -> None:
         """Task with max_retries=0 should go directly to DLQ on failure."""
         from conductor.core.models import RetryPolicy
@@ -494,6 +518,7 @@ class TestRetryAndDLQ:
             pool_max_size=2,
             pool_timeout=5.0,
         ) as worker:
+
             @worker.task("no_retry")
             async def handler(_payload: dict[str, Any]) -> dict[str, Any]:
                 raise RuntimeError("Direct to DLQ")
@@ -525,6 +550,7 @@ class TestConcurrency:
             pool_max_size=2,
             pool_timeout=5.0,
         ) as worker:
+
             @worker.task("slow")
             async def slow_handler(_payload: dict[str, Any]) -> dict[str, Any]:
                 nonlocal in_flight_counter, max_observed
@@ -541,15 +567,15 @@ class TestConcurrency:
                 await worker.run_once()
 
             assert max_observed <= concurrency, (
-                f"Observed {max_observed} concurrent tasks, "
-                f"limit was {concurrency}"
+                f"Observed {max_observed} concurrent tasks, " f"limit was {concurrency}"
             )
 
 
 class TestHeartbeat:
 
     async def test_heartbeat_updates_worker_record(
-        self, task_queue: Any,
+        self,
+        task_queue: Any,
     ) -> None:
         """Heartbeat should update the worker's database record."""
         async with Worker(
@@ -574,7 +600,8 @@ class TestHeartbeat:
             await run_task
 
     async def test_heartbeat_records_processing_status(
-        self, task_queue: Any,
+        self,
+        task_queue: Any,
     ) -> None:
         """Heartbeat should reflect processing status when working."""
         async with Worker(
@@ -585,6 +612,7 @@ class TestHeartbeat:
             pool_max_size=2,
             pool_timeout=5.0,
         ) as worker:
+
             @worker.task("long_task")
             async def long_handler(_payload: dict[str, Any]) -> dict[str, Any]:
                 await asyncio.sleep(0.5)
@@ -603,7 +631,8 @@ class TestHeartbeat:
             await run_task
 
     async def test_final_heartbeat_on_shutdown(
-        self, task_queue: Any,
+        self,
+        task_queue: Any,
     ) -> None:
         """Worker should send an 'unhealthy' heartbeat on shutdown."""
         async with Worker(
@@ -626,7 +655,8 @@ class TestHeartbeat:
 class TestGracefulShutdown:
 
     async def test_shutdown_waits_for_in_flight_tasks(
-        self, task_queue: Any,
+        self,
+        task_queue: Any,
     ) -> None:
         """Shutdown should wait for running tasks to complete."""
         async with Worker(
@@ -655,7 +685,8 @@ class TestGracefulShutdown:
             assert len(completed_tasks) == 3
 
     async def test_shutdown_timeout_cancels_stuck_tasks(
-        self, task_queue: Any,
+        self,
+        task_queue: Any,
     ) -> None:
         """Shutdown should cancel tasks that exceed the timeout."""
         async with Worker(
@@ -667,6 +698,7 @@ class TestGracefulShutdown:
             pool_max_size=2,
             pool_timeout=5.0,
         ) as worker:
+
             @worker.task("stuck")
             async def stuck_handler(_payload: dict[str, Any]) -> dict[str, Any]:
                 await asyncio.sleep(10)
@@ -682,28 +714,33 @@ class TestGracefulShutdown:
 class TestMultipleWorkers:
 
     async def test_two_workers_poll_same_queue(
-        self, task_queue: Any,
+        self,
+        task_queue: Any,
     ) -> None:
         """Two workers should register and poll without errors."""
         results: list[str] = []
 
-        async with Worker(
-            database_url=_db_url(),
-            worker_id="worker-a",
-            concurrency=5,
-            poll_interval=0.05,
-            pool_min_size=1,
-            pool_max_size=2,
-            pool_timeout=5.0,
-        ) as worker_a, Worker(
-            database_url=_db_url(),
-            worker_id="worker-b",
-            concurrency=5,
-            poll_interval=0.05,
-            pool_min_size=1,
-            pool_max_size=2,
-            pool_timeout=5.0,
-        ) as worker_b:
+        async with (
+            Worker(
+                database_url=_db_url(),
+                worker_id="worker-a",
+                concurrency=5,
+                poll_interval=0.05,
+                pool_min_size=1,
+                pool_max_size=2,
+                pool_timeout=5.0,
+            ) as worker_a,
+            Worker(
+                database_url=_db_url(),
+                worker_id="worker-b",
+                concurrency=5,
+                poll_interval=0.05,
+                pool_min_size=1,
+                pool_max_size=2,
+                pool_timeout=5.0,
+            ) as worker_b,
+        ):
+
             @worker_a.task("shared")
             async def handler_a(payload: dict[str, Any]) -> dict[str, Any]:
                 results.append(f"a:{payload['n']}")
@@ -785,7 +822,8 @@ class TestWorkerStatus:
 class TestRunOnce:
 
     async def test_run_once_processes_one_batch(
-        self, task_queue: Any,
+        self,
+        task_queue: Any,
     ) -> None:
         """run_once should process available tasks and return."""
         task_id = await task_queue.submit("run_once_test", {"val": 1})
@@ -797,6 +835,7 @@ class TestRunOnce:
             pool_max_size=2,
             pool_timeout=5.0,
         ) as worker:
+
             @worker.task("run_once_test")
             async def handler(payload: dict[str, Any]) -> dict[str, Any]:
                 return {"processed": payload["val"]}

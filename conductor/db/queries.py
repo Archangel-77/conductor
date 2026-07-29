@@ -23,6 +23,7 @@ logger = logging.getLogger("conductor.db.queries")
 # Validation helpers
 # ---------------------------------------------------------------------------
 
+
 def _validate_not_empty(value: Any, name: str) -> None:
     if not value or (isinstance(value, str) and not value.strip()):
         raise ValueError(f"{name} must not be empty")
@@ -31,22 +32,19 @@ def _validate_not_empty(value: Any, name: str) -> None:
 def _validate_task_status(status: str) -> None:
     valid = {"pending", "processing", "completed", "failed", "retrying"}
     if status not in valid:
-        raise ValueError(
-            f"Invalid task status '{status}'. Must be one of {valid}"
-        )
+        raise ValueError(f"Invalid task status '{status}'. Must be one of {valid}")
 
 
 def _validate_worker_status(status: str) -> None:
     valid = {"idle", "processing", "unhealthy"}
     if status not in valid:
-        raise ValueError(
-            f"Invalid worker status '{status}'. Must be one of {valid}"
-        )
+        raise ValueError(f"Invalid worker status '{status}'. Must be one of {valid}")
 
 
 # ---------------------------------------------------------------------------
 # QueryBuilder
 # ---------------------------------------------------------------------------
+
 
 class QueryBuilder:
     """Collects all database query operations for Conductor.
@@ -261,13 +259,42 @@ class QueryBuilder:
             params.append(datetime.now(timezone.utc))
             idx += 1
 
-        query = (
-            f"UPDATE conductor_tasks SET {', '.join(set_parts)} "
-            f"WHERE task_id = $1"
-        )
+        query = f"UPDATE conductor_tasks SET {', '.join(set_parts)} " f"WHERE task_id = $1"
 
         result_tag = await self._pool.execute(query, *params)
         return "UPDATE 1" in result_tag
+
+    async def clear_task_worker_id(self, task_id: str) -> bool:
+        """Set ``worker_id`` to ``NULL`` for a task without changing status.
+
+        This is used when retrying a task from the DLQ to disassociate it
+        from the worker that failed.
+
+        Returns ``True`` if a row was updated.
+        """
+        _validate_not_empty(task_id, "task_id")
+
+        result = await self._pool.execute(
+            "UPDATE conductor_tasks SET worker_id = NULL WHERE task_id = $1",
+            task_id,
+        )
+        return "UPDATE 1" in result
+
+    async def clear_task_error_message(self, task_id: str) -> bool:
+        """Set ``error_message`` to ``NULL`` for a task.
+
+        Used when retrying a task from the DLQ to clear the previous
+        failure message.
+
+        Returns ``True`` if a row was updated.
+        """
+        _validate_not_empty(task_id, "task_id")
+
+        result = await self._pool.execute(
+            "UPDATE conductor_tasks SET error_message = NULL WHERE task_id = $1",
+            task_id,
+        )
+        return "UPDATE 1" in result
 
     # ==================================================================
     # Retry history queries
@@ -297,9 +324,7 @@ class QueryBuilder:
             raise TaskError(f"Failed to insert retry record '{record['id']}'")
         return cast(str, row["id"])
 
-    async def select_retries_for_task(
-        self, task_id: str
-    ) -> list[dict[str, Any]]:
+    async def select_retries_for_task(self, task_id: str) -> list[dict[str, Any]]:
         """Fetch all retry records for a given task, ordered by attempt."""
         _validate_not_empty(task_id, "task_id")
 
@@ -481,9 +506,7 @@ class QueryBuilder:
         row = await self._pool.fetchrow(query, worker_id)
         return _row_to_dict(row) if row else None
 
-    async def select_active_workers(
-        self, heartbeat_timeout: float = 30.0
-    ) -> list[dict[str, Any]]:
+    async def select_active_workers(self, heartbeat_timeout: float = 30.0) -> list[dict[str, Any]]:
         """Fetch workers with heartbeat within *heartbeat_timeout* seconds."""
         if heartbeat_timeout <= 0:
             raise ValueError("heartbeat_timeout must be > 0")
@@ -543,16 +566,12 @@ class QueryBuilder:
         if not params:
             # Only updating the heartbeat timestamp
             result = await self._pool.execute(
-                "UPDATE conductor_workers"
-                " SET last_heartbeat = NOW() WHERE worker_id = $1",
+                "UPDATE conductor_workers" " SET last_heartbeat = NOW() WHERE worker_id = $1",
                 worker_id,
             )
             return "UPDATE 1" in result
 
-        query = (
-            f"UPDATE conductor_workers SET {', '.join(set_parts)} "
-            f"WHERE worker_id = $1"
-        )
+        query = f"UPDATE conductor_workers SET {', '.join(set_parts)} " f"WHERE worker_id = $1"
         result = await self._pool.execute(query, worker_id, *params)
         return "UPDATE 1" in result
 
@@ -570,24 +589,17 @@ class QueryBuilder:
         )
         return row or 0
 
-    async def count_dlq_tasks(
-        self, include_discarded: bool = False
-    ) -> int:
+    async def count_dlq_tasks(self, include_discarded: bool = False) -> int:
         """Count tasks in the dead-letter queue."""
         if include_discarded:
-            row = await self._pool.fetchval(
-                "SELECT COUNT(*) FROM conductor_dead_letter"
-            )
+            row = await self._pool.fetchval("SELECT COUNT(*) FROM conductor_dead_letter")
         else:
             row = await self._pool.fetchval(
-                "SELECT COUNT(*) FROM conductor_dead_letter"
-                " WHERE discarded = FALSE",
+                "SELECT COUNT(*) FROM conductor_dead_letter" " WHERE discarded = FALSE",
             )
         return row or 0
 
-    async def count_active_workers(
-        self, heartbeat_timeout: float = 30.0
-    ) -> int:
+    async def count_active_workers(self, heartbeat_timeout: float = 30.0) -> int:
         """Count workers with a recent heartbeat."""
         if heartbeat_timeout <= 0:
             raise ValueError("heartbeat_timeout must be > 0")
@@ -605,8 +617,7 @@ class QueryBuilder:
         Returns the number of deleted rows.
         """
         result = await self._pool.execute(
-            "DELETE FROM conductor_tasks"
-            " WHERE status = 'completed' AND completed_at < $1",
+            "DELETE FROM conductor_tasks" " WHERE status = 'completed' AND completed_at < $1",
             older_than,
         )
         # Extract the integer from the "DELETE N" tag
@@ -617,6 +628,7 @@ class QueryBuilder:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
 
 def _json(value: Any) -> Optional[str]:
     """Serialize a value to a JSON string, or return ``None``."""

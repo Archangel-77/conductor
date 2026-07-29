@@ -139,20 +139,13 @@ CREATE TABLE IF NOT EXISTS conductor_recurring_tasks (
 # ---------------------------------------------------------------------------
 
 TASK_INDEXES = [
-    "CREATE INDEX IF NOT EXISTS idx_tasks_status"
-    " ON conductor_tasks (status);",
-    "CREATE INDEX IF NOT EXISTS idx_tasks_task_type"
-    " ON conductor_tasks (task_type);",
-    "CREATE INDEX IF NOT EXISTS idx_tasks_route"
-    " ON conductor_tasks (route);",
-    "CREATE INDEX IF NOT EXISTS idx_tasks_priority"
-    " ON conductor_tasks (priority DESC);",
-    "CREATE INDEX IF NOT EXISTS idx_tasks_created_at"
-    " ON conductor_tasks (created_at);",
-    "CREATE INDEX IF NOT EXISTS idx_tasks_scheduled_for"
-    " ON conductor_tasks (scheduled_for);",
-    "CREATE INDEX IF NOT EXISTS idx_tasks_worker_id"
-    " ON conductor_tasks (worker_id);",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_status" " ON conductor_tasks (status);",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_task_type" " ON conductor_tasks (task_type);",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_route" " ON conductor_tasks (route);",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_priority" " ON conductor_tasks (priority DESC);",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_created_at" " ON conductor_tasks (created_at);",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_scheduled_for" " ON conductor_tasks (scheduled_for);",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_worker_id" " ON conductor_tasks (worker_id);",
     # Composite index used by the polling query
     (
         "CREATE INDEX IF NOT EXISTS idx_tasks_polling"
@@ -162,31 +155,25 @@ TASK_INDEXES = [
 ]
 
 WORKER_INDEXES = [
-    "CREATE INDEX IF NOT EXISTS idx_workers_status"
-    " ON conductor_workers (status);",
+    "CREATE INDEX IF NOT EXISTS idx_workers_status" " ON conductor_workers (status);",
     "CREATE INDEX IF NOT EXISTS idx_workers_last_heartbeat"
     " ON conductor_workers (last_heartbeat);",
 ]
 
 RETRIES_INDEXES = [
-    "CREATE INDEX IF NOT EXISTS idx_retries_task_id"
-    " ON conductor_retries (task_id);",
-    "CREATE INDEX IF NOT EXISTS idx_retries_scheduled_at"
-    " ON conductor_retries (scheduled_at);",
+    "CREATE INDEX IF NOT EXISTS idx_retries_task_id" " ON conductor_retries (task_id);",
+    "CREATE INDEX IF NOT EXISTS idx_retries_scheduled_at" " ON conductor_retries (scheduled_at);",
 ]
 
 DEAD_LETTER_INDEXES = [
-    "CREATE INDEX IF NOT EXISTS idx_dead_letter_discarded"
-    " ON conductor_dead_letter (discarded);",
-    "CREATE INDEX IF NOT EXISTS idx_dead_letter_moved_at"
-    " ON conductor_dead_letter (moved_at);",
+    "CREATE INDEX IF NOT EXISTS idx_dead_letter_discarded" " ON conductor_dead_letter (discarded);",
+    "CREATE INDEX IF NOT EXISTS idx_dead_letter_moved_at" " ON conductor_dead_letter (moved_at);",
 ]
 
 RECURRING_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_recurring_next_run"
     " ON conductor_recurring_tasks (next_run_at);",
-    "CREATE INDEX IF NOT EXISTS idx_recurring_enabled"
-    " ON conductor_recurring_tasks (enabled);",
+    "CREATE INDEX IF NOT EXISTS idx_recurring_enabled" " ON conductor_recurring_tasks (enabled);",
 ]
 
 # ---------------------------------------------------------------------------

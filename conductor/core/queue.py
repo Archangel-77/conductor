@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from conductor.core.models import (
+    DLQTask,
     RetryPolicy,
     Task,
     TaskStatus,
@@ -236,7 +237,8 @@ class TaskQueue:
                     task_ids.append(inserted_id)
                     logger.info(
                         "Task submitted: %s (%s)",
-                        inserted_id, db_dict["task_type"],
+                        inserted_id,
+                        db_dict["task_type"],
                     )
 
         return task_ids
@@ -278,7 +280,8 @@ class TaskQueue:
         """
         self._require_connected()
         rows = await self._query.select_pending_tasks(
-            limit=limit, offset=offset,
+            limit=limit,
+            offset=offset,
         )
         return [Task.from_dict(r) for r in rows]
 
@@ -298,7 +301,9 @@ class TaskQueue:
         """
         self._require_connected()
         rows = await self._query.select_tasks_by_status(
-            "completed", limit=limit, offset=offset,
+            "completed",
+            limit=limit,
+            offset=offset,
         )
         return [Task.from_dict(r) for r in rows]
 
@@ -318,7 +323,9 @@ class TaskQueue:
         """
         self._require_connected()
         rows = await self._query.select_tasks_by_status(
-            "failed", limit=limit, offset=offset,
+            "failed",
+            limit=limit,
+            offset=offset,
         )
         return [Task.from_dict(r) for r in rows]
 
@@ -336,6 +343,151 @@ class TaskQueue:
         return await self._query.count_tasks_by_status(status)
 
     # ------------------------------------------------------------------
+    # Dead-letter queue queries
+    # ------------------------------------------------------------------
+
+    async def list_dlq_tasks(
+        self,
+        limit: int = 10,
+        offset: int = 0,
+        include_discarded: bool = False,
+    ) -> list[DLQTask]:
+        """List tasks in the dead-letter queue, newest first.
+
+        Args:
+            limit: Maximum number of tasks to return.
+            offset: Number of tasks to skip (for pagination).
+            include_discarded: If ``True``, also include discarded tasks.
+
+        Returns:
+            A list of ``DLQTask`` objects.
+        """
+        self._require_connected()
+        rows = await self._query.select_dlq_tasks(
+            limit=limit,
+            offset=offset,
+            include_discarded=include_discarded,
+        )
+        return [DLQTask.from_dict(r) for r in rows]
+
+    async def get_dlq_task(self, task_id: str) -> Optional[DLQTask]:
+        """Fetch a single DLQ task by ID.
+
+        Args:
+            task_id: The unique task identifier.
+
+        Returns:
+            A ``DLQTask`` object or ``None`` if not found.
+        """
+        self._require_connected()
+        row = await self._query.select_dlq_task(task_id)
+        if row is None:
+            return None
+        return DLQTask.from_dict(row)
+
+    async def retry_dlq_task(self, task_id: str) -> str:
+        """Retry a task from the dead-letter queue.
+
+        Removes the task from the DLQ and resets the corresponding
+        ``conductor_tasks`` row to ``pending`` with ``attempt=0``.
+
+        Args:
+            task_id: The task to retry.
+
+        Returns:
+            The task ID that was retried.
+
+        Raises:
+            TaskError: If the task is not found in the DLQ.
+        """
+        self._require_connected()
+
+        dlq_row = await self._query.select_dlq_task(task_id)
+        if dlq_row is None:
+            raise TaskError(f"Task '{task_id}' not found in the dead-letter queue.")
+
+        now = utc_now()
+        await self._query.delete_dlq_task(task_id)
+
+        existing_task = await self._query.select_task(task_id)
+        if existing_task is not None:
+            await self._query.update_task_status(
+                task_id,
+                "pending",
+                worker_id=None,
+                error_message=None,
+                attempt=0,
+                scheduled_for=now,
+            )
+        else:
+            from conductor.core.models import RetryPolicy
+
+            rp = RetryPolicy.from_dict(dlq_row.get("retry_policy", {}))
+            task_dict: dict[str, Any] = {
+                "task_id": task_id,
+                "task_type": dlq_row["task_type"],
+                "payload": dlq_row.get("payload", {}),
+                "status": "pending",
+                "priority": 0,
+                "route": "default",
+                "attempt": 0,
+                "max_retries": rp.max_retries,
+                "retry_policy": rp.to_dict(),
+                "scheduled_for": now,
+                "worker_id": None,
+                "result": None,
+                "error_message": None,
+                "created_at": now,
+                "started_at": None,
+                "completed_at": None,
+            }
+            await self._query.insert_task(task_dict)
+
+        logger.info("Task %s retried from DLQ.", task_id)
+        return task_id
+
+    async def discard_dlq_task(
+        self,
+        task_id: str,
+        reason: Optional[str] = None,
+    ) -> None:
+        """Mark a DLQ task as permanently discarded.
+
+        Args:
+            task_id: The task to discard.
+            reason: Optional explanation for the discard.
+
+        Raises:
+            TaskError: If the task is not found in the DLQ.
+        """
+        self._require_connected()
+
+        dlq_row = await self._query.select_dlq_task(task_id)
+        if dlq_row is None:
+            raise TaskError(f"Task '{task_id}' not found in the dead-letter queue.")
+
+        await self._query.discard_dlq_task(task_id, reason=reason)
+        logger.info(
+            "Task %s discarded from DLQ (reason: %s).",
+            task_id,
+            reason or "no reason given",
+        )
+
+    async def count_dlq_tasks(self, include_discarded: bool = False) -> int:
+        """Count tasks in the dead-letter queue.
+
+        Args:
+            include_discarded: If ``True``, also count discarded tasks.
+
+        Returns:
+            The number of tasks in the DLQ.
+        """
+        self._require_connected()
+        return await self._query.count_dlq_tasks(
+            include_discarded=include_discarded,
+        )
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
@@ -348,8 +500,7 @@ class TaskQueue:
         """
         if not self._connected or self._pool.is_connected is False:
             raise TaskError(
-                "TaskQueue is not connected. Call connect() or use "
-                "'async with TaskQueue(...)'."
+                "TaskQueue is not connected. Call connect() or use " "'async with TaskQueue(...)'."
             )
         assert self._queries is not None  # guaranteed by _connected check
         return self._queries
@@ -363,8 +514,7 @@ class TaskQueue:
         """
         if not self._connected or self._pool.is_connected is False:
             raise TaskError(
-                "TaskQueue is not connected. Call connect() or use "
-                "'async with TaskQueue(...)'."
+                "TaskQueue is not connected. Call connect() or use " "'async with TaskQueue(...)'."
             )
 
     # ------------------------------------------------------------------
@@ -393,8 +543,7 @@ class TaskQueue:
         queries = self._queries
         if queries is None:
             raise TaskError(
-                "TaskQueue is not connected. Call connect() or use "
-                "'async with TaskQueue(...)'."
+                "TaskQueue is not connected. Call connect() or use " "'async with TaskQueue(...)'."
             )
         return queries
 
@@ -402,6 +551,7 @@ class TaskQueue:
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
+
 
 def _task_to_db_dict(task: Task) -> dict[str, Any]:
     """Convert a ``Task`` to the dict format expected by ``QueryBuilder``.

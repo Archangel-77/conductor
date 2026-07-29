@@ -25,6 +25,7 @@ logger = logging.getLogger("conductor.db.connection")
 # Configuration
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class PoolConfig:
     """Configuration for the database connection pool."""
@@ -70,6 +71,7 @@ class PoolConfig:
 # ---------------------------------------------------------------------------
 # DatabasePool
 # ---------------------------------------------------------------------------
+
 
 class DatabasePool:
     """Asyncpg connection pool with health checks and retry logic.
@@ -210,50 +212,37 @@ class DatabasePool:
             raise DatabaseError("Pool has been closed.")
 
         try:
-            async with self._pool.acquire(
-                timeout=self._config.timeout
-            ) as conn:
+            async with self._pool.acquire(timeout=self._config.timeout) as conn:
                 yield conn
         except asyncpg.PostgresError as exc:
-            raise DatabaseError(
-                f"Failed to acquire connection: {exc}"
-            ) from exc
+            raise DatabaseError(f"Failed to acquire connection: {exc}") from exc
         except asyncio.TimeoutError as exc:
             raise DatabaseError(
-                f"Timed out waiting for connection "
-                f"({self._config.timeout}s)"
+                f"Timed out waiting for connection " f"({self._config.timeout}s)"
             ) from exc
 
     # ------------------------------------------------------------------
     # Connection helpers
     # ------------------------------------------------------------------
 
-    async def fetchval(
-        self, query: str, *args: Any, **kwargs: Any
-    ) -> Any:
+    async def fetchval(self, query: str, *args: Any, **kwargs: Any) -> Any:
         """Execute a query and return the first column of the first row."""
         async with self.acquire() as conn:
             return cast(Any, await conn.fetchval(query, *args, **kwargs))
 
-    async def fetch(
-        self, query: str, *args: Any, **kwargs: Any
-    ) -> list[asyncpg.Record]:
+    async def fetch(self, query: str, *args: Any, **kwargs: Any) -> list[asyncpg.Record]:
         """Execute a query and return all rows as a list of ``Record``."""
         async with self.acquire() as conn:
             result = await conn.fetch(query, *args, **kwargs)
             return cast("list[asyncpg.Record]", result)
 
-    async def fetchrow(
-        self, query: str, *args: Any, **kwargs: Any
-    ) -> Optional[asyncpg.Record]:
+    async def fetchrow(self, query: str, *args: Any, **kwargs: Any) -> Optional[asyncpg.Record]:
         """Execute a query and return the first row (or ``None``)."""
         async with self.acquire() as conn:
             result = await conn.fetchrow(query, *args, **kwargs)
             return cast("Optional[asyncpg.Record]", result)
 
-    async def execute(
-        self, query: str, *args: Any, **kwargs: Any
-    ) -> str:
+    async def execute(self, query: str, *args: Any, **kwargs: Any) -> str:
         """Execute a query and return the command status tag."""
         async with self.acquire() as conn:
             return cast(str, await conn.execute(query, *args, **kwargs))

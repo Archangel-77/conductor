@@ -29,10 +29,10 @@ from conductor.core.models import (
 )
 from conductor.exceptions import RetryPolicyError
 
-
 # ===================================================================
 # Enums
 # ===================================================================
+
 
 class TestTaskStatus:
     """Verify the TaskStatus enum values and conversions."""
@@ -75,6 +75,7 @@ class TestBackoffStrategyType:
 # ===================================================================
 # RetryPolicy
 # ===================================================================
+
 
 class TestRetryPolicy:
 
@@ -119,16 +120,18 @@ class TestRetryPolicy:
         assert d["backoff_strategy"] == "exponential"
 
     def test_from_dict(self) -> None:
-        d = {"max_retries": 5, "backoff_strategy": "linear",
-             "initial_delay": 2.0, "max_delay": 30.0}
+        d = {
+            "max_retries": 5,
+            "backoff_strategy": "linear",
+            "initial_delay": 2.0,
+            "max_delay": 30.0,
+        }
         p = RetryPolicy.from_dict(d)
         assert p.max_retries == 5
         assert p.backoff_strategy == BackoffStrategyType.LINEAR
 
     def test_round_trip(self) -> None:
-        p = RetryPolicy(
-            max_retries=7, backoff_strategy=BackoffStrategyType.FIXED
-        )
+        p = RetryPolicy(max_retries=7, backoff_strategy=BackoffStrategyType.FIXED)
         p2 = RetryPolicy.from_dict(p.to_dict())
         assert p == p2
 
@@ -136,6 +139,7 @@ class TestRetryPolicy:
 # ===================================================================
 # Task
 # ===================================================================
+
 
 class TestTask:
 
@@ -186,8 +190,7 @@ class TestTask:
             "error_message": None,
             "created_at": "2025-01-15T10:00:00+00:00",
             "started_at": None,
-            "completed_at":
-                "2025-01-15T10:00:05+00:00",
+            "completed_at": "2025-01-15T10:00:05+00:00",
         }
         t = Task.from_dict(d)
         assert t.task_id == "t1"
@@ -211,6 +214,7 @@ class TestTask:
 # WorkerInfo
 # ===================================================================
 
+
 class TestWorkerInfo:
 
     def test_minimal_construction(self) -> None:
@@ -231,7 +235,9 @@ class TestWorkerInfo:
 
     def test_round_trip(self) -> None:
         w = WorkerInfo(
-            worker_id="w1", hostname="h1", pid=99,
+            worker_id="w1",
+            hostname="h1",
+            pid=99,
             tasks_processed_total=42,
         )
         w2 = WorkerInfo.from_dict(w.to_dict())
@@ -242,6 +248,7 @@ class TestWorkerInfo:
 # ===================================================================
 # RetryRecord
 # ===================================================================
+
 
 class TestRetryRecord:
 
@@ -272,6 +279,7 @@ class TestRetryRecord:
 # DLQTask
 # ===================================================================
 
+
 class TestDLQTask:
 
     def test_minimal_construction(self) -> None:
@@ -281,16 +289,22 @@ class TestDLQTask:
 
     def test_discard(self) -> None:
         d = DLQTask(
-            task_id="t1", task_type="email", payload={},
-            discarded=True, discard_reason="manual",
+            task_id="t1",
+            task_type="email",
+            payload={},
+            discarded=True,
+            discard_reason="manual",
         )
         assert d.discarded is True
         assert d.discard_reason == "manual"
 
     def test_round_trip(self) -> None:
         d1 = DLQTask(
-            task_id="t1", task_type="email", payload={"a": 1},
-            attempts=3, error_message="fail",
+            task_id="t1",
+            task_type="email",
+            payload={"a": 1},
+            attempts=3,
+            error_message="fail",
         )
         d2 = DLQTask.from_dict(d1.to_dict())
         assert d1.task_id == d2.task_id
@@ -300,6 +314,7 @@ class TestDLQTask:
 # ===================================================================
 # Backoff Strategy classes
 # ===================================================================
+
 
 class TestExponentialBackoff:
 

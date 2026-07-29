@@ -13,13 +13,13 @@ import pytest
 
 from conductor.db.schema import SCHEMA_VERSION, CREATE_VERSION_TABLE
 
-
 pytestmark = pytest.mark.integration
 
 
 # ===================================================================
 # Schema constants
 # ===================================================================
+
 
 class TestSchemaConstants:
 
@@ -33,6 +33,7 @@ class TestSchemaConstants:
 # ===================================================================
 # Table creation
 # ===================================================================
+
 
 class TestTableCreation:
 
@@ -52,17 +53,14 @@ class TestTableCreation:
         ]
         for table in tables:
             row = await db_pool.fetchrow(
-                "SELECT tablename FROM pg_catalog.pg_tables "
-                "WHERE tablename = $1",
+                "SELECT tablename FROM pg_catalog.pg_tables " "WHERE tablename = $1",
                 table,
             )
             assert row is not None, f"Table '{table}' not found"
 
     async def test_version_tracked(self, db_pool: Any) -> None:
         """The conductor_version table should record version 1."""
-        row = await db_pool.fetchrow(
-            "SELECT version FROM conductor_version"
-        )
+        row = await db_pool.fetchrow("SELECT version FROM conductor_version")
         assert row is not None
         assert row["version"] == 1
 
@@ -70,6 +68,7 @@ class TestTableCreation:
 # ===================================================================
 # Constraints & checks
 # ===================================================================
+
 
 class TestConstraints:
 
@@ -80,7 +79,9 @@ class TestConstraints:
                 "INSERT INTO conductor_tasks "
                 "(task_id, task_type, status) "
                 "VALUES ($1, $2, $3)",
-                "bad-status-task", "test", "invalid_status",
+                "bad-status-task",
+                "test",
+                "invalid_status",
             )
 
     async def test_task_priority_range(self, db_pool: Any) -> None:
@@ -90,16 +91,17 @@ class TestConstraints:
                 "INSERT INTO conductor_tasks "
                 "(task_id, task_type, payload, priority) "
                 "VALUES ($1, $2, '{}', $3)",
-                "bad-priority-task", "test", 200,
+                "bad-priority-task",
+                "test",
+                200,
             )
 
     async def test_valid_task_insert(self, db_pool: Any) -> None:
         """A valid task insert should succeed."""
         result = await db_pool.execute(
-            "INSERT INTO conductor_tasks "
-            "(task_id, task_type, payload) "
-            "VALUES ($1, $2, '{}')",
-            "valid-task-1", "test",
+            "INSERT INTO conductor_tasks " "(task_id, task_type, payload) " "VALUES ($1, $2, '{}')",
+            "valid-task-1",
+            "test",
         )
         assert "INSERT" in result
 
@@ -107,6 +109,7 @@ class TestConstraints:
 # ===================================================================
 # Indexes
 # ===================================================================
+
 
 class TestIndexes:
 
@@ -141,6 +144,7 @@ class TestIndexes:
 # Idempotent migrations
 # ===================================================================
 
+
 class TestIdempotentMigrations:
 
     async def test_ensure_schema_twice(self, schema_manager: Any) -> None:
@@ -149,9 +153,7 @@ class TestIdempotentMigrations:
 
     async def test_version_not_duplicated(self, db_pool: Any) -> None:
         """Version row should not be duplicated after re-migration."""
-        rows = await db_pool.fetch(
-            "SELECT version FROM conductor_version"
-        )
+        rows = await db_pool.fetch("SELECT version FROM conductor_version")
         assert len(rows) == 1
 
 
@@ -159,18 +161,16 @@ class TestIdempotentMigrations:
 # Rollback
 # ===================================================================
 
+
 class TestRollback:
 
-    async def test_rollback_drops_tables(
-        self, schema_manager: Any, db_pool: Any
-    ) -> None:
+    async def test_rollback_drops_tables(self, schema_manager: Any, db_pool: Any) -> None:
         """Rollback to v0 should drop all conductor tables."""
         await schema_manager.rollback(target_version=0)
 
         # Tables should be gone
         row = await db_pool.fetchrow(
-            "SELECT tablename FROM pg_catalog.pg_tables "
-            "WHERE tablename LIKE 'conductor_%'"
+            "SELECT tablename FROM pg_catalog.pg_tables " "WHERE tablename LIKE 'conductor_%'"
         )
         assert row is None
 

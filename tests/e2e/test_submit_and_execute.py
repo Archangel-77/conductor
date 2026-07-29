@@ -39,6 +39,7 @@ pytestmark = [
 # Fixtures
 # ===================================================================
 
+
 @pytest_asyncio.fixture(scope="module", loop_scope="module", name="task_queue")
 async def _task_queue_factory() -> Any:
     """Create a TaskQueue connected to the test database."""
@@ -79,9 +80,11 @@ async def _cleanup_test_data(task_queue: Any) -> Any:
 # Helper: DB URL
 # ===================================================================
 
+
 def _db_url() -> str:
     """Return the test database URL."""
     from tests.conftest import TEST_DATABASE_URL
+
     return TEST_DATABASE_URL
 
 
@@ -89,10 +92,12 @@ def _db_url() -> str:
 # E2E Tests
 # ===================================================================
 
+
 class TestSubmitAndExecute:
 
     async def test_happy_path_submit_poll_execute_complete(
-        self, task_queue: Any,
+        self,
+        task_queue: Any,
     ) -> None:
         """Full happy path: submit task → worker polls → executes → completes."""
         task_id = await task_queue.submit(
@@ -107,6 +112,7 @@ class TestSubmitAndExecute:
             pool_max_size=2,
             pool_timeout=5.0,
         ) as worker:
+
             @worker.task("e2e_greet")
             async def greet_handler(payload: dict[str, Any]) -> dict[str, Any]:
                 return {"greeting": f"Hello, {payload['name']}!"}
@@ -124,7 +130,8 @@ class TestSubmitAndExecute:
         assert task.completed_at >= task.started_at
 
     async def test_task_status_transitions_end_to_end(
-        self, task_queue: Any,
+        self,
+        task_queue: Any,
     ) -> None:
         """Verify each status transition through the full lifecycle."""
         task_id = await task_queue.submit(
@@ -145,6 +152,7 @@ class TestSubmitAndExecute:
             pool_max_size=2,
             pool_timeout=5.0,
         ) as worker:
+
             @worker.task("e2e_transitions")
             async def handler(_payload: dict[str, Any]) -> dict[str, Any]:
                 return {"done": True}
@@ -159,7 +167,8 @@ class TestSubmitAndExecute:
         assert task.completed_at is not None
 
     async def test_result_storage_and_retrieval(
-        self, task_queue: Any,
+        self,
+        task_queue: Any,
     ) -> None:
         """Handler result should be stored in the database and retrievable."""
         task_id = await task_queue.submit(
@@ -174,6 +183,7 @@ class TestSubmitAndExecute:
             pool_max_size=2,
             pool_timeout=5.0,
         ) as worker:
+
             @worker.task("e2e_result")
             async def handler(payload: dict[str, Any]) -> dict[str, Any]:
                 return {
@@ -193,7 +203,8 @@ class TestSubmitAndExecute:
         }
 
     async def test_multiple_tasks_sequential(
-        self, task_queue: Any,
+        self,
+        task_queue: Any,
     ) -> None:
         """Multiple tasks submitted sequentially should all complete."""
         task_ids = []
@@ -212,6 +223,7 @@ class TestSubmitAndExecute:
             pool_max_size=2,
             pool_timeout=5.0,
         ) as worker:
+
             @worker.task("e2e_sequential")
             async def handler(payload: dict[str, Any]) -> dict[str, Any]:
                 return {"seq": payload["seq"], "status": "done"}
@@ -225,7 +237,8 @@ class TestSubmitAndExecute:
             assert task.status == TaskStatus.COMPLETED
 
     async def test_submit_and_execute_with_custom_retry(
-        self, task_queue: Any,
+        self,
+        task_queue: Any,
     ) -> None:
         """Task with custom retry policy should respect it."""
         from conductor.core.models import RetryPolicy
@@ -244,6 +257,7 @@ class TestSubmitAndExecute:
             pool_max_size=2,
             pool_timeout=5.0,
         ) as worker:
+
             @worker.task("e2e_retry_custom")
             async def handler(_payload: dict[str, Any]) -> dict[str, Any]:
                 raise RuntimeError("Simulated failure")
@@ -256,7 +270,8 @@ class TestSubmitAndExecute:
         assert task.attempt == 1
 
     async def test_task_with_result_null(
-        self, task_queue: Any,
+        self,
+        task_queue: Any,
     ) -> None:
         """Handler returning None should store empty result."""
         task_id = await task_queue.submit(
@@ -271,6 +286,7 @@ class TestSubmitAndExecute:
             pool_max_size=2,
             pool_timeout=5.0,
         ) as worker:
+
             @worker.task("e2e_null_result")
             async def handler(_payload: dict[str, Any]) -> None:
                 return None
@@ -286,7 +302,8 @@ class TestSubmitAndExecute:
 class TestRetryWorkflowE2E:
 
     async def test_retry_then_succeed(
-        self, task_queue: Any,
+        self,
+        task_queue: Any,
     ) -> None:
         """Task fails first time, retries, and succeeds on second attempt."""
         from conductor.core.models import RetryPolicy
@@ -307,6 +324,7 @@ class TestRetryWorkflowE2E:
             pool_max_size=2,
             pool_timeout=5.0,
         ) as worker:
+
             @worker.task("e2e_retry_succeed")
             async def handler(payload: dict[str, Any]) -> dict[str, Any]:
                 nonlocal attempt_count
@@ -338,6 +356,7 @@ class TestRetryWorkflowE2E:
             pool_max_size=2,
             pool_timeout=5.0,
         ) as worker2:
+
             @worker2.task("e2e_retry_succeed")
             async def handler2(_payload: dict[str, Any]) -> dict[str, Any]:
                 return {"succeeded": True}
@@ -349,7 +368,8 @@ class TestRetryWorkflowE2E:
         assert task.status == TaskStatus.COMPLETED
 
     async def test_exhausted_retries_move_to_dlq(
-        self, task_queue: Any,
+        self,
+        task_queue: Any,
     ) -> None:
         """Task that exhausts all retries should end up in DLQ."""
         from conductor.core.models import RetryPolicy
@@ -368,6 +388,7 @@ class TestRetryWorkflowE2E:
             pool_max_size=2,
             pool_timeout=5.0,
         ) as worker:
+
             @worker.task("e2e_exhaust")
             async def handler(_payload: dict[str, Any]) -> dict[str, Any]:
                 raise RuntimeError("Always fails")
@@ -385,7 +406,8 @@ class TestRetryWorkflowE2E:
         assert "Always fails" in dlq_task["error_message"]
 
     async def test_dlq_task_can_be_retried(
-        self, task_queue: Any,
+        self,
+        task_queue: Any,
     ) -> None:
         """A task in the DLQ should be retriable (via DLQ API)."""
         from conductor.core.models import RetryPolicy
@@ -404,6 +426,7 @@ class TestRetryWorkflowE2E:
             pool_max_size=2,
             pool_timeout=5.0,
         ) as worker:
+
             @worker.task("e2e_dlq_retry")
             async def handler(_payload: dict[str, Any]) -> dict[str, Any]:
                 raise RuntimeError("Direct to DLQ")
@@ -430,6 +453,7 @@ class TestRetryWorkflowE2E:
             pool_max_size=2,
             pool_timeout=5.0,
         ) as worker2:
+
             @worker2.task("e2e_dlq_retry")
             async def good_handler(_payload: dict[str, Any]) -> dict[str, Any]:
                 return {"recovered": True}
@@ -445,7 +469,8 @@ class TestRetryWorkflowE2E:
 class TestMultipleWorkersE2E:
 
     async def test_two_workers_process_concurrent_tasks(
-        self, task_queue: Any,
+        self,
+        task_queue: Any,
     ) -> None:
         """Two workers should both process tasks without conflict."""
         results_a: list[int] = []
@@ -459,21 +484,24 @@ class TestMultipleWorkersE2E:
             )
             task_ids.append(tid)
 
-        async with Worker(
-            database_url=_db_url(),
-            worker_id="e2e-worker-a",
-            concurrency=5,
-            pool_min_size=1,
-            pool_max_size=2,
-            pool_timeout=5.0,
-        ) as wa, Worker(
-            database_url=_db_url(),
-            worker_id="e2e-worker-b",
-            concurrency=5,
-            pool_min_size=1,
-            pool_max_size=2,
-            pool_timeout=5.0,
-        ) as wb:
+        async with (
+            Worker(
+                database_url=_db_url(),
+                worker_id="e2e-worker-a",
+                concurrency=5,
+                pool_min_size=1,
+                pool_max_size=2,
+                pool_timeout=5.0,
+            ) as wa,
+            Worker(
+                database_url=_db_url(),
+                worker_id="e2e-worker-b",
+                concurrency=5,
+                pool_min_size=1,
+                pool_max_size=2,
+                pool_timeout=5.0,
+            ) as wb,
+        ):
 
             @wa.task("e2e_concurrent")
             async def handler_a(payload: dict[str, Any]) -> dict[str, Any]:

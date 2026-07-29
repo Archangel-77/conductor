@@ -4,6 +4,8 @@ Conductor core package.
 Contains models, task queue, and worker implementation.
 """
 
+from __future__ import annotations
+
 from conductor.core.models import (
     Task,
     TaskStatus,

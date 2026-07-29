@@ -15,13 +15,13 @@ import pytest
 from conductor.db.connection import DatabasePool, PoolConfig
 from conductor.exceptions import ConductorConnectionError
 
-
 pytestmark = pytest.mark.integration
 
 
 # ===================================================================
 # PoolConfig validation
 # ===================================================================
+
 
 class TestPoolConfig:
 
@@ -51,6 +51,7 @@ class TestPoolConfig:
 # ===================================================================
 # DatabasePool – connection lifecycle
 # ===================================================================
+
 
 class TestDatabasePoolConnect:
 
@@ -93,6 +94,7 @@ class TestDatabasePoolConnect:
 # DatabasePool – query helpers
 # ===================================================================
 
+
 class TestDatabasePoolQueries:
 
     async def test_fetchval(self, db_pool: Any) -> None:
@@ -118,6 +120,7 @@ class TestDatabasePoolQueries:
 # ===================================================================
 # Concurrent connections
 # ===================================================================
+
 
 class TestConcurrentConnections:
 

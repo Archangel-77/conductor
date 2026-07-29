@@ -81,9 +81,7 @@ class Worker:
         # Worker identity
         hostname = get_hostname()
         pid = os.getpid()
-        self._worker_id: str = (
-            worker_id or f"{hostname}-{pid}"
-        )
+        self._worker_id: str = worker_id or f"{hostname}-{pid}"
         self._hostname = hostname
         self._pid = pid
 
@@ -219,8 +217,7 @@ class Worker:
 
             if task_type in self._handlers:
                 raise ValueError(
-                    f"A handler for task_type '{task_type}' is already "
-                    f"registered."
+                    f"A handler for task_type '{task_type}' is already " f"registered."
                 )
 
             # Validate handler signature: it must accept exactly 1 positional
@@ -280,10 +277,13 @@ class Worker:
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             try:
+
                 def _make_handler(sig_h: signal.Signals) -> Callable[[], None]:
                     def _handler() -> None:
                         asyncio.ensure_future(self._handle_signal(sig_h))
+
                     return _handler
+
                 loop.add_signal_handler(sig, _make_handler(sig))
             except NotImplementedError:
                 # Signal handlers not supported on this platform (e.g., Windows)
@@ -293,8 +293,7 @@ class Worker:
                 )
 
         logger.info(
-            "Worker '%s' started. Polling every %.2fs, "
-            "concurrency=%d, routes=%s",
+            "Worker '%s' started. Polling every %.2fs, " "concurrency=%d, routes=%s",
             self._worker_id,
             self._poll_interval,
             self._concurrency,
@@ -389,9 +388,7 @@ class Worker:
                 all_tasks.append(Task.from_dict(row))
 
         # Sort all tasks by priority DESC, created_at ASC (mimicking DB order)
-        all_tasks.sort(
-            key=lambda t: (-t.priority, t.created_at)
-        )
+        all_tasks.sort(key=lambda t: (-t.priority, t.created_at))
 
         # Limit batch size (cap at 10 per poll cycle)
         batch_size = min(len(all_tasks), 10)
@@ -489,21 +486,21 @@ class Worker:
                 max_delay=task.retry_policy.max_delay,
             )
             scheduled_for_ts = utc_now().timestamp() + delay
-            scheduled_dt = datetime.fromtimestamp(
-                scheduled_for_ts, tz=timezone.utc
-            )
+            scheduled_dt = datetime.fromtimestamp(scheduled_for_ts, tz=timezone.utc)
 
             # Record the retry in the retries table
             # Build the dict manually so datetime objects stay native
             # (to_dict() serializes them to strings, which asyncpg rejects).
-            await queries.insert_retry_record({
-                "id": generate_task_id(),
-                "task_id": task.task_id,
-                "attempt": new_attempt,
-                "error_message": error_message,
-                "scheduled_at": scheduled_dt,
-                "created_at": utc_now(),
-            })
+            await queries.insert_retry_record(
+                {
+                    "id": generate_task_id(),
+                    "task_id": task.task_id,
+                    "attempt": new_attempt,
+                    "error_message": error_message,
+                    "scheduled_at": scheduled_dt,
+                    "created_at": utc_now(),
+                }
+            )
 
             # Update the task status to "retrying" and set scheduled_for
             await queries.update_task_status(
@@ -526,15 +523,17 @@ class Worker:
             # Max retries exceeded — move to dead-letter queue
             now = utc_now()
             # Build the dict manually so datetime objects stay native
-            await queries.insert_dlq_task({
-                "task_id": task.task_id,
-                "task_type": task.task_type,
-                "payload": task.payload,
-                "error_message": error_message,
-                "attempts": new_attempt,
-                "retry_policy": task.retry_policy.to_dict(),
-                "moved_at": now,
-            })
+            await queries.insert_dlq_task(
+                {
+                    "task_id": task.task_id,
+                    "task_type": task.task_type,
+                    "payload": task.payload,
+                    "error_message": error_message,
+                    "attempts": new_attempt,
+                    "retry_policy": task.retry_policy.to_dict(),
+                    "moved_at": now,
+                }
+            )
 
             # Update the task status to "failed"
             await queries.update_task_status(
@@ -546,8 +545,7 @@ class Worker:
             )
 
             logger.warning(
-                "Task %s (%s) moved to DLQ after %d attempts. "
-                "Last error: %s",
+                "Task %s (%s) moved to DLQ after %d attempts. " "Last error: %s",
                 task.task_id,
                 task.task_type,
                 new_attempt,
@@ -604,9 +602,7 @@ class Worker:
         assert queries is not None
 
         while not self._shutdown_requested:
-            uptime = (
-                utc_now() - self._started_at
-            ).total_seconds() if self._started_at else 0.0
+            uptime = (utc_now() - self._started_at).total_seconds() if self._started_at else 0.0
 
             # Determine current status
             if self._current_task_id is not None:
@@ -616,9 +612,13 @@ class Worker:
 
             # Send heartbeat — a single failure shouldn't kill the loop
             hb_error = await _send_heartbeat(
-                queries, self._worker_id, current_status,
-                self._current_task_id, uptime,
-                self._tasks_processed_total, self._tasks_failed_total,
+                queries,
+                self._worker_id,
+                current_status,
+                self._current_task_id,
+                uptime,
+                self._tasks_processed_total,
+                self._tasks_failed_total,
             )
             if hb_error is None:
                 logger.debug(
@@ -660,9 +660,7 @@ class Worker:
 
         Called from both ``shutdown()`` and the ``run()`` finally block.
         """
-        logger.info(
-            "Worker '%s' shutting down...", self._worker_id
-        )
+        logger.info("Worker '%s' shutting down...", self._worker_id)
 
         # Stop the heartbeat task
         if self._heartbeat_task is not None and not self._heartbeat_task.done():
@@ -675,8 +673,7 @@ class Worker:
         # Wait for in-flight tasks to complete (with timeout)
         if self._in_flight_tasks:
             logger.info(
-                "Waiting for %d in-flight task(s) to complete "
-                "(timeout: %.0fs)...",
+                "Waiting for %d in-flight task(s) to complete " "(timeout: %.0fs)...",
                 len(self._in_flight_tasks),
                 self._graceful_shutdown_timeout,
             )
@@ -688,8 +685,7 @@ class Worker:
 
             if pending:
                 logger.warning(
-                    "%d task(s) did not complete within the "
-                    "shutdown timeout. Cancelling...",
+                    "%d task(s) did not complete within the " "shutdown timeout. Cancelling...",
                     len(pending),
                 )
                 for t in pending:
@@ -699,13 +695,15 @@ class Worker:
         # Send a final heartbeat with "unhealthy" status
         queries = self._queries
         if queries is not None:
-            uptime = (
-                utc_now() - self._started_at
-            ).total_seconds() if self._started_at else 0.0
+            uptime = (utc_now() - self._started_at).total_seconds() if self._started_at else 0.0
             final_error = await _send_heartbeat(
-                queries, self._worker_id, WorkerStatus.UNHEALTHY.value,
-                None, uptime,
-                self._tasks_processed_total, self._tasks_failed_total,
+                queries,
+                self._worker_id,
+                WorkerStatus.UNHEALTHY.value,
+                None,
+                uptime,
+                self._tasks_processed_total,
+                self._tasks_failed_total,
             )
             if final_error is not None:
                 logger.debug(
@@ -718,8 +716,7 @@ class Worker:
         await self.disconnect()
 
         logger.info(
-            "Worker '%s' shut down. "
-            "Processed=%d, Failed=%d",
+            "Worker '%s' shut down. " "Processed=%d, Failed=%d",
             self._worker_id,
             self._tasks_processed_total,
             self._tasks_failed_total,
@@ -885,6 +882,7 @@ def _worker_info_to_db_dict(
 # ---------------------------------------------------------------------------
 # Backoff delay calculation
 # ---------------------------------------------------------------------------
+
 
 def calculate_backoff_delay(
     attempt: int,

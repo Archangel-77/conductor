@@ -5,6 +5,8 @@ Conductor — Lightweight async task queue for Python
 Exposes the public API of the Conductor library.
 """
 
+from __future__ import annotations
+
 from conductor.core.models import (
     BackoffStrategyType,
     DLQTask,
@@ -33,8 +35,7 @@ from conductor.exceptions import (
 from conductor.core.queue import TaskQueue
 from conductor.core.worker import Worker
 
-# The following will be uncommented as those modules are implemented:
-# from conductor.dlq.dead_letter_queue import DeadLetterQueue
+from conductor.dlq.dead_letter_queue import DeadLetterQueue
 
 __all__: list[str] = [
     "BackoffStrategyType",
@@ -60,6 +61,5 @@ __all__: list[str] = [
     "WorkerError",
     "WorkerInfo",
     "WorkerStatus",
-    # To be added:
-    # "DeadLetterQueue",
+    "DeadLetterQueue",
 ]

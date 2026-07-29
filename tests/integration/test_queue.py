@@ -33,6 +33,7 @@ pytestmark = [
 # Fixtures
 # ===================================================================
 
+
 @pytest_asyncio.fixture(scope="module", loop_scope="module", name="queue")
 async def _queue_factory() -> Any:
     """Create a TaskQueue connected to the test database.
@@ -76,6 +77,7 @@ async def _cleanup(queue: Any) -> Any:
 # ===================================================================
 # Integration tests
 # ===================================================================
+
 
 class TestTaskQueueIntegration:
 
@@ -130,7 +132,9 @@ class TestTaskQueueIntegration:
         # Move to processing
         qb = queue.query_builder
         await qb.update_task_status(
-            task_id, "processing", worker_id="test-worker",
+            task_id,
+            "processing",
+            worker_id="test-worker",
         )
 
         task = await queue.get_task(task_id)
@@ -140,7 +144,9 @@ class TestTaskQueueIntegration:
 
         # Move to completed
         await qb.update_task_status(
-            task_id, "completed", result={"output": "done"},
+            task_id,
+            "completed",
+            result={"output": "done"},
         )
 
         task = await queue.get_task(task_id)
@@ -163,7 +169,9 @@ class TestTaskQueueIntegration:
         task_id = await queue.submit("fail_me", {"bad": True})
 
         await queue.query_builder.update_task_status(
-            task_id, "failed", error_message="Intentional failure",
+            task_id,
+            "failed",
+            error_message="Intentional failure",
         )
 
         failed = await queue.list_failed_tasks()
@@ -190,7 +198,9 @@ class TestTaskQueueIntegration:
             max_delay=60.0,
         )
         task_id = await queue.submit(
-            "retry_test", {"attempts": 7}, retry_policy=rp,
+            "retry_test",
+            {"attempts": 7},
+            retry_policy=rp,
         )
 
         task = await queue.get_task(task_id)
@@ -203,7 +213,9 @@ class TestTaskQueueIntegration:
         """Scheduled tasks should not appear in pending list immediately."""
         future = datetime(2099, 1, 1, tzinfo=timezone.utc)  # noqa: UP017
         task_id = await queue.submit(
-            "future_task", {"scheduled": True}, scheduled_for=future,
+            "future_task",
+            {"scheduled": True},
+            scheduled_for=future,
         )
 
         # Should not appear in pending (scheduled_for is in the far future)
@@ -219,7 +231,9 @@ class TestTaskQueueIntegration:
     async def test_submit_with_custom_task_id(self, queue: Any) -> None:
         """Explicit task_id should be honored."""
         task_id = await queue.submit(
-            "custom_id_test", {}, task_id="my-explicit-id",
+            "custom_id_test",
+            {},
+            task_id="my-explicit-id",
         )
         assert task_id == "my-explicit-id"
 
@@ -231,14 +245,18 @@ class TestTaskQueueIntegration:
         task_id = await queue.submit("dup_test", {})
         with pytest.raises(TaskError):
             await queue.submit(
-                "dup_test_again", {}, task_id=task_id,
+                "dup_test_again",
+                {},
+                task_id=task_id,
             )
 
     async def test_submit_with_route_and_priority(self, queue: Any) -> None:
         """Route and priority should be persisted."""
         task_id = await queue.submit(
-            "routed_task", {},
-            route="high_priority", priority=50,
+            "routed_task",
+            {},
+            route="high_priority",
+            priority=50,
         )
 
         task = await queue.get_task(task_id)
