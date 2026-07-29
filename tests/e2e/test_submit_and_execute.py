@@ -328,7 +328,7 @@ class TestRetryWorkflowE2E:
             task_id,
             "pending",
             attempt=1,
-            scheduled_for=datetime.now(timezone.utc),
+            scheduled_for=datetime.now(timezone.utc),  # noqa: UP017
         )
 
         async with Worker(
@@ -420,7 +420,7 @@ class TestRetryWorkflowE2E:
             "pending",
             attempt=0,
             worker_id=None,
-            scheduled_for=datetime.now(timezone.utc),
+            scheduled_for=datetime.now(timezone.utc),  # noqa: UP017
         )
 
         async with Worker(

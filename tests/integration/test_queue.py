@@ -201,7 +201,7 @@ class TestTaskQueueIntegration:
 
     async def test_submit_scheduled_task(self, queue: Any) -> None:
         """Scheduled tasks should not appear in pending list immediately."""
-        future = datetime(2099, 1, 1, tzinfo=timezone.utc)
+        future = datetime(2099, 1, 1, tzinfo=timezone.utc)  # noqa: UP017
         task_id = await queue.submit(
             "future_task", {"scheduled": True}, scheduled_for=future,
         )
