@@ -5,7 +5,7 @@ These tests require a running PostgreSQL instance (see ``docker-compose.yml``).
 They are skipped automatically if the database is unreachable.
 """
 
-# pylint: disable=missing-class-docstring,import-outside-toplevel
+# pylint: disable=missing-class-docstring,import-outside-toplevel,protected-access
 
 from __future__ import annotations
 
@@ -152,7 +152,7 @@ class TestTaskQueueIntegration:
         """Completed tasks should appear in the completed list."""
         task_id = await queue.submit("complete_me", {"go": True})
 
-        await queue.query_builder.update_task_status(task_id, "completed", result={"ok": True})  # pylint: disable=protected-access
+        await queue.query_builder.update_task_status(task_id, "completed", result={"ok": True})
 
         completed = await queue.list_completed_tasks()
         ids = [t.task_id for t in completed]
@@ -162,7 +162,7 @@ class TestTaskQueueIntegration:
         """Failed tasks should appear in the failed list."""
         task_id = await queue.submit("fail_me", {"bad": True})
 
-        await queue.query_builder.update_task_status(  # pylint: disable=protected-access
+        await queue.query_builder.update_task_status(
             task_id, "failed", error_message="Intentional failure",
         )
 

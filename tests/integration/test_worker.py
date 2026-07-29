@@ -18,6 +18,7 @@ Tests cover:
 - Multiple workers polling the same queue
 - Worker status reporting
 """
+# pylint: disable=missing-class-docstring,import-outside-toplevel,protected-access
 
 # pylint: disable=missing-class-docstring,import-outside-toplevel
 
@@ -473,7 +474,7 @@ class TestRetryAndDLQ:
         assert task is not None
         assert task.status == TaskStatus.FAILED
 
-        dlq_row = await task_queue.query_builder.select_dlq_task(task_id)  # pylint: disable=protected-access
+        dlq_row = await task_queue.query_builder.select_dlq_task(task_id)
         assert dlq_row is not None
         assert dlq_row["task_id"] == task_id
 
@@ -503,7 +504,7 @@ class TestRetryAndDLQ:
         assert task is not None
         assert task.status == TaskStatus.FAILED
 
-        dlq_row = await task_queue.query_builder.select_dlq_task(task_id)  # pylint: disable=protected-access
+        dlq_row = await task_queue.query_builder.select_dlq_task(task_id)
         assert dlq_row is not None
 
 
@@ -562,7 +563,7 @@ class TestHeartbeat:
             run_task = asyncio.create_task(worker.run())
             await asyncio.sleep(0.6)
 
-            row = await task_queue.query_builder.select_worker(  # pylint: disable=protected-access
+            row = await task_queue.query_builder.select_worker(
                 "heartbeat-test",
             )
             assert row is not None
@@ -593,7 +594,7 @@ class TestHeartbeat:
             run_task = asyncio.create_task(worker.run())
             await asyncio.sleep(0.8)
 
-            row = await task_queue.query_builder.select_worker(  # pylint: disable=protected-access
+            row = await task_queue.query_builder.select_worker(
                 "heartbeat-busy-test",
             )
             assert row is not None
@@ -617,7 +618,7 @@ class TestHeartbeat:
             await worker.shutdown()
             await run_task
 
-        row = await task_queue.query_builder.select_worker("final-hb-test")  # pylint: disable=protected-access
+        row = await task_queue.query_builder.select_worker("final-hb-test")
         assert row is not None
         assert row["status"] == "unhealthy"
 
