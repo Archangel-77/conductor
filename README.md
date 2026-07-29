@@ -13,26 +13,21 @@ Conductor orchestrates reliable, distributed task execution with exactly-once se
 
 ---
 
-## Local Development
-
-```bash
-# 1. Start PostgreSQL
-docker compose up -d
-
-# 2. Copy and configure environment
-cp .env.example .env
-
-# 3. Create virtual environment & install
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-
-# 4. Run the schema migration (creates tables)
-python -c "import asyncio; from conductor.db.connection import DatabasePool; from conductor.db.schema import SchemaManager; async def main(): async with DatabasePool(dsn='postgresql://conductor:conductor@localhost:5432/conductor') as pool: await SchemaManager(pool).ensure_schema(); print('Schema ready!'); asyncio.run(main())"
-
-# 5. Run tests
-pytest
-```
+- [Why Conductor?](#why-conductor)
+- [Quick Start](#quick-start)
+- [Core Features](#core-features)
+- [Installation](#installation)
+- [Usage Examples](#usage-examples)
+- [Configuration](#configuration)
+- [Deployment](#deployment)
+- [Architecture](#architecture)
+- [API Reference](#api-reference)
+- [Best Practices](#best-practices)
+- [Troubleshooting](#troubleshooting)
+- [Comparison to Alternatives](#comparison-to-alternatives)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [License](#license)
 
 ---
 
@@ -51,6 +46,7 @@ pytest
 - [Troubleshooting](#troubleshooting)
 - [Comparison to Alternatives](#comparison-to-alternatives)
 - [Roadmap](#roadmap)
+- [Local Development](#local-development)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -73,7 +69,7 @@ Conductor solves this by:
 
 ✅ **No external dependencies** – PostgreSQL only. Deploy to any server, container, or serverless environment  
 ✅ **Exactly-once semantics** – Tasks execute once, guaranteed. Built-in idempotency and deduplication  
-✅ **Observable from day one** – Structured logging, metrics hooks, health endpoints out of the box  
+✅ **Observable from day one** – Structured logging with task-level context, Prometheus metrics and health check endpoints (coming in v0.1)  
 ✅ **Production-ready** – Exponential backoff, circuit breakers, graceful shutdown, dead letter queues  
 ✅ **Simple API** – Submit a task in one line. Register a worker in two  
 ✅ **Built for async** – Native asyncio support. No threads, no blocking calls
@@ -97,52 +93,62 @@ pip install conductor-task-queue
 **1. Submit a task** (app.py):
 
 ```python
-from conductor import TaskQueue
+import asyncio
+from conductor import TaskQueue, RetryPolicy
 
-# Initialize the task queue
-queue = TaskQueue(database_url="postgresql://user:password@localhost/conductor")
 
-# Submit a task
-task_id = queue.submit(
-    task_type="send_email",
-    payload={
-        "to": "user@example.com",
-        "subject": "Hello",
-        "body": "Welcome to Conductor!"
-    },
-    retry_policy={
-        "max_retries": 3,
-        "backoff": "exponential"
-    }
-)
+async def main() -> None:
+    async with TaskQueue(
+        database_url="postgresql://user:password@localhost/conductor"
+    ) as queue:
+        task_id = await queue.submit(
+            task_type="send_email",
+            payload={
+                "to": "user@example.com",
+                "subject": "Hello",
+                "body": "Welcome to Conductor!",
+            },
+            retry_policy=RetryPolicy(
+                max_retries=3,
+                backoff_strategy="exponential",
+            ),
+        )
+        print(f"Task submitted: {task_id}")
 
-print(f"Task submitted: {task_id}")
+
+asyncio.run(main())
 ```
 
 **2. Process tasks with a worker** (worker.py):
 
 ```python
-from conductor import Worker
 import asyncio
+from conductor import Worker
 
-worker = Worker(database_url="postgresql://user:password@localhost/conductor")
 
-@worker.task("send_email")
-async def send_email(payload):
-    to = payload["to"]
-    subject = payload["subject"]
-    body = payload["body"]
-    
-    # Send email logic here
-    print(f"Sending email to {to}: {subject}")
-    
-    # Simulate sending
-    await asyncio.sleep(0.5)
-    
-    return {"status": "sent"}
+async def main() -> None:
+    async with Worker(
+        database_url="postgresql://user:password@localhost/conductor"
+    ) as worker:
 
-if __name__ == "__main__":
-    asyncio.run(worker.run())
+        @worker.task("send_email")
+        async def send_email(payload: dict) -> dict:
+            to = payload["to"]
+            subject = payload["subject"]
+            body = payload["body"]
+
+            # Send email logic here
+            print(f"Sending email to {to}: {subject}")
+
+            # Simulate sending
+            await asyncio.sleep(0.5)
+
+            return {"status": "sent"}
+
+        await worker.run()
+
+
+asyncio.run(main())
 ```
 
 **3. Run it**:
@@ -155,7 +161,7 @@ python worker.py
 python app.py
 ```
 
-**That's it.** Your task is submitted, retried on failure, visible in logs, and executed exactly once.
+**That's it.** Your task is submitted, retried on failure, and executed exactly once.
 
 ---
 
@@ -187,25 +193,27 @@ async def process_payment(payload):
 Configurable retry policies with automatic backoff:
 
 ```python
-queue.submit(
+from conductor import RetryPolicy
+
+await queue.submit(
     task_type="flaky_api_call",
     payload={"url": "https://api.example.com/data"},
-    retry_policy={
-        "max_retries": 5,
-        "backoff": "exponential",
-        "initial_delay": 1,  # seconds
-        "max_delay": 300
-    }
+    retry_policy=RetryPolicy(
+        max_retries=5,
+        backoff_strategy="exponential",
+        initial_delay=1.0,  # seconds
+        max_delay=300.0,
+    ),
 )
 ```
 
-**Retry attempts**:
+**Retry attempts** (with default exponential backoff, max_retries=5):
 - Attempt 1: Immediate
-- Attempt 2: 1 second delay
-- Attempt 3: 2 second delay
-- Attempt 4: 4 second delay
-- Attempt 5: 8 second delay
-- Attempt 6: Move to dead letter queue
+- Attempt 2: ~1 second delay
+- Attempt 3: ~2 second delay
+- Attempt 4: ~4 second delay
+- Attempt 5: ~8 second delay
+- Attempt 6: Moved to dead letter queue
 
 ### 3. Dead Letter Queue
 
@@ -220,96 +228,61 @@ dlq = DeadLetterQueue(database_url="postgresql://...")
 failed_tasks = dlq.list_tasks(limit=10)
 
 for task in failed_tasks:
-    print(f"Task {task.id} failed: {task.error}")
+    print(f"Task {task.task_id} failed: {task.error_message}")
     print(f"Attempts: {task.attempts}")
-    print(f"Last error: {task.last_error_message}")
 
 # Retry a failed task manually
-dlq.retry_task(task_id="abc-123")
+await dlq.retry_task(task_id="abc-123")
 
 # Or mark as permanently failed
-dlq.discard_task(task_id="abc-123", reason="Known issue, will retry manually later")
+await dlq.discard_task(task_id="abc-123", reason="Known issue, will retry manually later")
 ```
 
 ### 4. Built-in Observability
 
-#### Structured Logging
-
-All task events logged with correlation IDs:
-
-```python
-# Logs automatically include:
-# - task_id: Unique identifier
-# - task_type: Type of task
-# - worker_id: Which worker processed it
-# - duration_ms: How long it took
-# - status: success | failed | retried
-
-# Example log output (JSON):
-{
-  "timestamp": "2025-01-15T10:30:45.123Z",
-  "level": "INFO",
-  "task_id": "task-abc-123",
-  "task_type": "send_email",
-  "worker_id": "worker-1",
-  "event": "task_completed",
-  "duration_ms": 245,
-  "status": "success"
-}
-```
-
-#### Prometheus Metrics
-
-Export metrics for Grafana dashboards:
+Conductor logs every task transition with structured context using
+Python's standard ``logging`` module.  All log messages include
+task ID, task type, worker ID, and duration where applicable.
 
 ```python
-from conductor import MetricsExporter
+import logging
 
-exporter = MetricsExporter(port=8000)
+logger = logging.getLogger("conductor.core.worker")
 
-# Metrics available at http://localhost:8000/metrics:
-# - conductor_tasks_submitted_total
-# - conductor_tasks_completed_total
-# - conductor_tasks_failed_total
-# - conductor_tasks_retried_total
-# - conductor_task_duration_seconds
-# - conductor_workers_active
+# Automatically logged events:
+# - Task submitted  (INFO)
+# - Task started    (DEBUG)
+# - Task completed  (INFO)  — includes duration_ms
+# - Task failed     (ERROR) — includes error_message
+# - Task retrying   (WARNING)
+# - Task moved to DLQ (WARNING)
 ```
 
-#### Health Checks
-
-Built-in health endpoints for orchestration:
-
-```
-GET /health
-{
-  "status": "healthy",
-  "database": "connected",
-  "pending_tasks": 42,
-  "dead_letter_queue": 3,
-  "workers_active": 5,
-  "uptime_seconds": 3600
-}
-```
+> **Coming in v0.1 release (Sprint 5):** Structured JSON logging,
+> Prometheus metrics exporter, and health check endpoints.
+> Track progress at the
+> [GitHub repository](https://github.com/Archangel-77/Conductor).
 
 ### 5. Graceful Shutdown
 
-Workers shut down cleanly, completing in-flight tasks:
+Workers shut down cleanly, completing in-flight tasks. Use the ``run()`` method
+which handles ``SIGTERM`` and ``SIGINT`` automatically:
 
 ```python
-import signal
+import asyncio
+from conductor import Worker
 
-worker = Worker(database_url="postgresql://...")
 
-def handle_shutdown(sig, frame):
-    print("Shutting down gracefully...")
-    worker.shutdown()
+async def main() -> None:
+    async with Worker(database_url="postgresql://...") as worker:
+        await worker.run()  # runs until SIGTERM/SIGINT
 
-signal.signal(signal.SIGTERM, handle_shutdown)
-signal.signal(signal.SIGINT, handle_shutdown)
 
-# All in-flight tasks complete before exit
-asyncio.run(worker.run())
+asyncio.run(main())
+```
+
+To shut down programmatically, call ``await worker.shutdown()``.
+All in-flight tasks complete before the worker disconnects.
 ```
 
 ---
@@ -329,10 +302,11 @@ pip install conductor-task-queue
 
 ### Step 2: Initialize Database
 
-Conductor automatically creates tables on first run. Optionally, run migrations manually:
+Conductor automatically creates tables on first connect.  Just create
+the database and the schema is applied automatically:
 
 ```bash
-conductor migrate --database-url postgresql://user:password@localhost/conductor
+createdb conductor
 ```
 
 This creates:
@@ -341,21 +315,30 @@ This creates:
 - `conductor_retries` – Retry history
 - `conductor_dead_letter` – Failed tasks
 
+> **Note:** A CLI migration tool is planned for a future release.
+> For now, schema is auto-managed on first ``connect()``.
+
 ### Step 3: Create a Worker
 
 ```python
-from conductor import Worker
 import asyncio
+from conductor import Worker
 
-worker = Worker(database_url="postgresql://user:password@localhost/conductor")
 
-@worker.task("example_task")
-async def example_task(payload):
-    print(f"Processing: {payload}")
-    return {"status": "done"}
+async def main() -> None:
+    async with Worker(
+        database_url="postgresql://user:password@localhost/conductor"
+    ) as worker:
 
-if __name__ == "__main__":
-    asyncio.run(worker.run())
+        @worker.task("example_task")
+        async def example_task(payload: dict) -> dict:
+            print(f"Processing: {payload}")
+            return {"status": "done"}
+
+        await worker.run()
+
+
+asyncio.run(main())
 ```
 
 Run it:
@@ -367,16 +350,22 @@ python worker.py
 ### Step 4: Submit Tasks
 
 ```python
+import asyncio
 from conductor import TaskQueue
 
-queue = TaskQueue(database_url="postgresql://user:password@localhost/conductor")
 
-task_id = queue.submit(
-    task_type="example_task",
-    payload={"message": "Hello, Conductor!"}
-)
+async def main() -> None:
+    async with TaskQueue(
+        database_url="postgresql://user:password@localhost/conductor"
+    ) as queue:
+        task_id = await queue.submit(
+            task_type="example_task",
+            payload={"message": "Hello, Conductor!"},
+        )
+        print(f"Submitted task: {task_id}")
 
-print(f"Submitted task: {task_id}")
+
+asyncio.run(main())
 ```
 
 ---
@@ -388,58 +377,73 @@ print(f"Submitted task: {task_id}")
 Send emails with automatic retry and error handling:
 
 ```python
-from conductor import Worker, TaskQueue
 import asyncio
-import aiohttp
 import logging
-import os
+
+import aiohttp
+
+from conductor import RetryPolicy, TaskQueue, Worker
+
 
 logger = logging.getLogger(__name__)
-SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 
-queue = TaskQueue(database_url="postgresql://user:password@localhost/conductor")
-worker = Worker(database_url="postgresql://user:password@localhost/conductor")
 
-@worker.task("send_email")
-async def send_email(payload):
-    """Send an email via SendGrid API"""
-    to = payload["to"]
-    subject = payload["subject"]
-    body = payload["body"]
-    
-    logger.info(f"Sending email to {to}", extra={"task_id": payload.get("_task_id")})
-    
-    async with aiohttp.ClientSession() as session:
-        try:
-            await session.post(
-                "https://api.sendgrid.com/v3/mail/send",
-                json={
-                    "personalizations": [{"to": [{"email": to}]}],
-                    "from": {"email": "noreply@example.com"},
-                    "subject": subject,
-                    "content": [{"type": "text/html", "value": body}]
-                },
-                headers={"Authorization": f"Bearer {SENDGRID_API_KEY}"}
-            )
-            logger.info(f"Email sent to {to}")
-        except Exception as e:
-            logger.error(f"Failed to send email: {str(e)}")
-            raise
+async def main() -> None:
+    async with Worker(
+        database_url="postgresql://user:password@localhost/conductor"
+    ) as worker:
+
+        @worker.task("send_email")
+        async def send_email(payload: dict) -> dict:
+            """Send an email via SendGrid API."""
+            to = payload["to"]
+            subject = payload["subject"]
+            body = payload["body"]
+
+            logger.info("Sending email to %s", to)
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    "https://api.sendgrid.com/v3/mail/send",
+                    json={
+                        "personalizations": [{"to": [{"email": to}]}],
+                        "from": {"email": "noreply@example.com"},
+                        "subject": subject,
+                        "content": [{"type": "text/html", "value": body}],
+                    },
+                    headers={"Authorization": f"Bearer ..."},
+                ) as resp:
+                    resp.raise_for_status()
+
+            logger.info("Email sent to %s", to)
+            return {"status": "sent", "to": to}
+
+        await worker.run()
+
 
 # Submit an email task
-queue.submit(
-    task_type="send_email",
-    payload={
-        "to": "user@example.com",
-        "subject": "Welcome!",
-        "body": "<h1>Thanks for signing up</h1>"
-    },
-    retry_policy={
-        "max_retries": 3,
-        "backoff": "exponential",
-        "initial_delay": 1
-    }
-)
+async def submit_email() -> None:
+    async with TaskQueue(
+        database_url="postgresql://user:password@localhost/conductor"
+    ) as queue:
+        task_id = await queue.submit(
+            task_type="send_email",
+            payload={
+                "to": "user@example.com",
+                "subject": "Welcome!",
+                "body": "<h1>Thanks for signing up</h1>",
+            },
+            retry_policy=RetryPolicy(
+                max_retries=3,
+                backoff_strategy="exponential",
+                initial_delay=1.0,
+            ),
+        )
+        print(f"Submitted task: {task_id}")
+
+
+if __name__ == "__main__":
+    asyncio.run(submit_email())
 ```
 
 ### Example 2: Data Processing Pipeline
@@ -447,38 +451,48 @@ queue.submit(
 Multi-step data processing with task chaining:
 
 ```python
+import logging
+
+from conductor import TaskQueue
+
+logger = logging.getLogger(__name__)
+
+
 @worker.task("process_upload")
-async def process_upload(payload):
-    """Process an uploaded file through a pipeline"""
+async def process_upload(payload: dict) -> dict:
+    """Process an uploaded file through a pipeline."""
     file_id = payload["file_id"]
     user_id = payload["user_id"]
-    
-    logger.info(f"Starting to process file {file_id}")
-    
+
+    logger.info("Starting to process file %s", file_id)
+
     try:
         # Step 1: Download
         file_data = await download_file(file_id)
-        
+
         # Step 2: Process
         result = await process_data(file_data)
-        
+
         # Step 3: Store
         await store_result(file_id, result)
-        
+
         # Step 4: Notify user (spawn another task)
-        queue.submit(
-            task_type="send_notification",
-            payload={
-                "user_id": user_id,
-                "message": "Your file is ready",
-                "result_id": result["id"]
-            }
-        )
-        
-        logger.info(f"Successfully processed file {file_id}")
+        async with TaskQueue(
+            database_url="postgresql://user:password@localhost/conductor"
+        ) as queue:
+            await queue.submit(
+                task_type="send_notification",
+                payload={
+                    "user_id": user_id,
+                    "message": "Your file is ready",
+                    "result_id": result["id"],
+                },
+            )
+
+        logger.info("Successfully processed file %s", file_id)
         return {"file_id": file_id, "status": "processed"}
     except Exception as e:
-        logger.error(f"Failed to process file {file_id}: {str(e)}")
+        logger.error("Failed to process file %s: %s", file_id, str(e))
         raise
 ```
 
@@ -487,27 +501,43 @@ async def process_upload(payload):
 Regular maintenance tasks:
 
 ```python
-# Schedule a daily cleanup task (manual approach for v0.1)
-# In v0.2, use: queue.schedule_recurring(task_type="cleanup_expired_sessions", cron_expression="0 2 * * *")
+import logging
+from datetime import datetime, timezone
+
+from conductor import TaskQueue
+
+logger = logging.getLogger(__name__)
+
 
 @worker.task("cleanup_expired_sessions")
-async def cleanup_expired_sessions(payload):
-    """Remove expired user sessions"""
+async def cleanup_expired_sessions(payload: dict) -> dict:
+    """Remove expired user sessions."""
     logger.info("Starting daily session cleanup")
-    
+
     try:
         deleted_count = await db.execute(
             "DELETE FROM sessions WHERE expires_at < NOW()"
         )
-        logger.info(f"Successfully deleted {deleted_count} expired sessions")
+        logger.info(
+            "Deleted %d expired sessions", deleted_count
+        )
         return {"deleted": deleted_count}
     except Exception as e:
-        logger.error(f"Failed to cleanup sessions: {str(e)}")
+        logger.error("Failed to cleanup sessions: %s", str(e))
         raise
 
-# Submit manually or use a cron job to submit daily:
-# queue.submit(task_type="cleanup_expired_sessions", payload={})
+
+# Submit via cron job: runs daily at 2 AM
+# async with TaskQueue(database_url="...") as queue:
+#     await queue.submit(
+#         task_type="cleanup_expired_sessions",
+#         payload={},
+#     )
 ```
+
+> **Tip:** For recurring/scheduled tasks, use an external cron job
+> or systemd timer to submit tasks on a schedule. Native cron
+> support is planned for v0.2.
 
 ### Example 4: Error Handling & Idempotency
 
@@ -570,9 +600,13 @@ from conductor import TaskQueue
 
 queue = TaskQueue(
     database_url="postgresql://user:password@localhost/conductor",
-    timeout=30,              # Task execution timeout (seconds)
-    max_task_age=86400,      # Clean up tasks older than 1 day
-    log_level="INFO"         # Logging level
+    task_timeout=300.0,       # Task execution timeout (seconds)
+    max_task_age=86400,       # Clean up tasks older than 1 day
+    log_level="INFO",         # Logging level
+    pool_min_size=2,          # Minimum DB pool connections
+    pool_max_size=10,         # Maximum DB pool connections
+    pool_timeout=30.0,        # DB pool acquire timeout
+    command_timeout=60.0,     # SQL command timeout
 )
 ```
 
@@ -583,44 +617,58 @@ from conductor import Worker
 
 worker = Worker(
     database_url="postgresql://user:password@localhost/conductor",
-    worker_id="worker-1",    # Unique worker identifier
-    concurrency=10,          # Max concurrent tasks
-    poll_interval=0.5,       # Check for tasks every 500ms
-    routes=["default"],      # Which queues to subscribe to
-    log_level="INFO"
+    worker_id="worker-1",           # Unique worker identifier
+    concurrency=10,                  # Max concurrent tasks
+    poll_interval=0.5,               # Check for tasks every 500ms
+    routes=None,                     # ``None`` polls all routes
+    log_level="INFO",
+    heartbeat_interval=10.0,         # DB heartbeat every 10s
+    graceful_shutdown_timeout=30.0,  # Wait 30s for in-flight tasks
 )
 ```
 
 ### Retry Policies
 
 ```python
+from conductor import RetryPolicy
+
 # Default retry policy
-{
-    "max_retries": 3,
-    "backoff": "exponential",
-    "initial_delay": 1,      # seconds
-    "max_delay": 3600
-}
+RetryPolicy(
+    max_retries=3,
+    backoff_strategy="exponential",
+    initial_delay=1.0,  # seconds
+    max_delay=3600.0,
+)
 
 # No retries
-{
-    "max_retries": 0
-}
+RetryPolicy(max_retries=0)
 
 # Linear backoff (5s, 10s, 15s, 20s, 25s)
-{
-    "max_retries": 5,
-    "backoff": "linear",
-    "initial_delay": 5,
-    "increment": 5
-}
+RetryPolicy(
+    max_retries=5,
+    backoff_strategy="linear",
+    initial_delay=5.0,
+    max_delay=3600.0,
+)
 
 # Fixed backoff (always 10s delay)
-{
-    "max_retries": 10,
-    "backoff": "fixed",
-    "initial_delay": 10
-}
+RetryPolicy(
+    max_retries=10,
+    backoff_strategy="fixed",
+    initial_delay=10.0,
+    max_delay=3600.0,
+)
+```
+
+You can also pass a dict with matching keys (useful for JSON configs):
+
+```python
+policy = RetryPolicy.from_dict({
+    "max_retries": 3,
+    "backoff_strategy": "exponential",
+    "initial_delay": 1.0,
+    "max_delay": 3600.0,
+})
 ```
 
 ### Environment Variables
@@ -651,6 +699,12 @@ HEALTH_PORT=8000
 # Tasks
 TASK_TIMEOUT=300
 MAX_TASK_AGE=86400
+
+# Connection pool
+POOL_MIN_SIZE=2
+POOL_MAX_SIZE=10
+POOL_TIMEOUT=30
+COMMAND_TIMEOUT=60
 ```
 
 ---
@@ -879,7 +933,7 @@ Get completed tasks.
 
 #### `list_failed_tasks(limit=10, offset=0)`
 
-Get failed tasks (moved to DLQ).
+Get tasks that failed (``status='failed'``).
 
 #### `get_task(task_id)`
 
@@ -926,28 +980,39 @@ Gracefully shut down the worker.
 
 ### DeadLetterQueue
 
-#### `list_tasks(limit=10, offset=0)`
+#### `list_tasks(limit=10, offset=0, include_discarded=False)`
 
-List failed tasks.
+List tasks in the dead-letter queue.
+
+**Parameters**:
+- `include_discarded` (bool): Include soft-deleted tasks
 
 **Returns**: `List[DLQTask]`
 
 #### `get_task(task_id)`
 
-Get a single failed task.
+Get a single DLQ task.
 
 **Returns**: `DLQTask` or `None`
 
 #### `retry_task(task_id)`
 
-Retry a failed task (move back to main queue).
+Retry a task from the DLQ (reset to pending, clears worker and error).
 
-#### `discard_task(task_id, reason)`
+**Returns**: `str` — The task ID
 
-Permanently discard a task.
+#### `discard_task(task_id, reason=None)`
+
+Permanently mark a DLQ task as discarded (soft-delete).
 
 **Parameters**:
-- `reason` (str): Why the task is being discarded
+- `reason` (str, optional): Why the task is being discarded
+
+#### `count(include_discarded=False)`
+
+Count tasks in the dead-letter queue.
+
+**Returns**: `int`
 
 ---
 
@@ -974,9 +1039,9 @@ async def set_status(payload):
     # Safe to run multiple times (same result each time)
 ```
 
-### 2. Log Task Context
+### 2. Use Structured Logging
 
-Include task ID in all logs:
+Use lazy %-formatting for better performance:
 
 ```python
 import logging
@@ -984,21 +1049,33 @@ import logging
 logger = logging.getLogger(__name__)
 
 @worker.task("process_data")
-async def process_data(payload):
-    task_id = payload.get("_task_id")  # Conductor injects this
-    logger.info(f"[{task_id}] Starting processing", extra={"task_id": task_id})
+async def process_data(payload: dict) -> dict:
+    task_id = payload.get("task_id", "unknown")
+    logger.info("Task %s starting processing", task_id)
     # ... do work ...
-    logger.info(f"[{task_id}] Completed", extra={"task_id": task_id})
+    logger.info("Task %s completed", task_id)
+    return {"status": "done"}
 ```
 
-### 3. Set Reasonable Timeouts
+### 3. Handle Exceptions Gracefully
+
+Always catch ``ConductorException`` for predictable error handling:
 
 ```python
-queue.submit(
-    task_type="quick_operation",
-    payload={},
-    timeout=10  # This task must complete in 10 seconds
-)
+from conductor import TaskQueue
+from conductor.exceptions import ConductorException
+
+
+async with TaskQueue(database_url="...") as queue:
+    try:
+        task_id = await queue.submit(
+            task_type="critical_job",
+            payload={"data": "..."},
+        )
+        print(f"Submitted: {task_id}")
+    except ConductorException as exc:
+        # Database connection failure, invalid config, etc.
+        print(f"Failed to submit: {exc}")
 ```
 
 ### 4. Monitor Dead Letter Queue
@@ -1006,14 +1083,21 @@ queue.submit(
 Don't ignore failed tasks:
 
 ```python
+import asyncio
 from conductor import DeadLetterQueue
 
-dlq = DeadLetterQueue(database_url="...")
 
-# Periodically check
-failed = dlq.list_tasks(limit=100)
-if failed:
-    alert_ops_team(f"⚠️ {len(failed)} tasks in DLQ")
+async def check_dlq() -> None:
+    async with DeadLetterQueue(database_url="...") as dlq:
+        count = await dlq.count()
+        if count > 0:
+            tasks = await dlq.list_tasks(limit=100)
+            print(f"⚠️ {len(tasks)} tasks in DLQ")
+            for task in tasks:
+                print(f"  - {task.task_id}: {task.error_message}")
+
+
+asyncio.run(check_dlq())
 ```
 
 ### 5. Scale Horizontally
@@ -1146,7 +1230,9 @@ worker = Worker(database_url=database_url)
    ```python
    queue = TaskQueue(
        database_url="...",
-       pool_size=20  # Increase from default 10
+       pool_min_size=5,
+       pool_max_size=20,  # Increase from default 10
+       pool_timeout=60.0,
    )
    ```
 
@@ -1180,7 +1266,7 @@ worker = Worker(database_url=database_url)
 
 ## Comparison to Alternatives
 
-| Feature | Conductor | Celery | RQ | dramatiq |
+| Feature | Conductor | Celery | RQ | Dramatiq |
 |---------|-----------|--------|-----|----------|
 | **No external broker** | ✅ | ❌ (needs Redis/RabbitMQ) | ❌ (needs Redis) | ❌ (needs RabbitMQ) |
 | **Exactly-once semantics** | ✅ | ⚠️ (at-least-once) | ⚠️ (at-least-once) | ⚠️ (at-least-once) |
@@ -1190,6 +1276,7 @@ worker = Worker(database_url=database_url)
 | **Graceful shutdown** | ✅ | ✅ | ✅ | ✅ |
 | **Scheduled tasks** | ⚠️ (v0.2) | ✅ | ❌ | ✅ |
 | **Async-native** | ✅ | ⚠️ (hybrid) | ❌ | ✅ |
+| **PostgreSQL only** | ✅ | ❌ | ❌ | ❌ |
 | **Production-ready** | ✅ | ✅ | ⚠️ | ✅ |
 
 **When to use Conductor**:
@@ -1211,12 +1298,12 @@ worker = Worker(database_url=database_url)
 
 | Metric | Target | Notes |
 |--------|--------|-------|
-| Task submission | <2ms | In-memory insert, batch commits |
+| Task submission | <2ms | Single-row insert |
 | Task polling latency | ~500ms | Dictated by poll_interval (configurable) |
-| Task processing (empty) | <10ms | Status update + database write |
+| Task processing (empty handler) | <10ms | Status update + database write |
 | Throughput (simple task) | 400+ tasks/sec per worker | Scales linearly with worker count |
 | Memory per worker | ~50MB base | + payload size |
-| Database load (100 tasks/sec) | ~15% CPU, ~2GB RAM | PostgreSQL 15 on localhost |
+| Database load (100 tasks/sec) | ~15% CPU | PostgreSQL on localhost |
 
 **Notes**:
 - Latency is dominated by polling interval (currently 500ms). Can be tuned for lower latency / higher DB load.
@@ -1227,38 +1314,59 @@ worker = Worker(database_url=database_url)
 
 ## Roadmap
 
-### Phase 1 (v0.1 - Current)
+### Phase 1 (v0.1 — Current)
 
-✅ **Released**:
+✅ **Completed**:
 - Basic task queue
 - Retry logic with exponential backoff
-- Dead letter queue
-- Worker pool
-- Structured logging
-- Prometheus metrics
-- Health checks
-- Graceful shutdown
+- Dead letter queue with retry/discard API
+- Worker pool with concurrency control
+- Graceful shutdown with signal handling
 
-### Phase 2 (v0.2 - Planned)
+🔄 **In Progress**:
+- Structured logging (Sprint 5)
+- Prometheus metrics exporter (Sprint 5)
+- Health check endpoint (Sprint 5)
+- Performance benchmarks (Sprint 6)
+- Docker & deployment examples (Sprint 6)
+- Comprehensive documentation (Sprint 6)
 
-🔲 **In Progress**:
-- Task routing (multiple queues/worker pools)
-- Priority queues
-- Scheduled/recurring tasks (cron)
-- Web dashboard (task monitoring UI)
-- gRPC API (polyglot workers in Go, Rust, Node.js)
-- Circuit breaker pattern
-- Task dependencies/chaining
+### Phase 2 (v0.2 — Planned)
 
-### Phase 3 (v0.3+ - Future)
+🔲 Task routing, priority queues, scheduled/recurring tasks (cron)
+🔲 Web dashboard, gRPC API
+🔲 Circuit breaker pattern, task dependencies/chaining
 
-🔲 **Planned**:
-- MySQL/MariaDB backend support
-- SQLite backend (embedded, single-server)
-- Distributed tracing (OpenTelemetry)
-- Managed SaaS offering (Conductor Cloud)
-- Advanced workflows (DAG-based orchestration)
-- Task versioning & rollback
+### Phase 3 (v0.3+ — Future)
+
+🔲 Multi-database support (MySQL, SQLite)
+🔲 Distributed tracing (OpenTelemetry)
+🔲 Advanced workflows, task versioning
+
+---
+
+## Local Development
+
+```bash
+# 1. Start PostgreSQL
+docker compose up -d
+
+# 2. Copy and configure environment
+cp .env.example .env
+
+# 3. Create virtual environment & install
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+
+# 4. Run tests (schema auto-creates on first connect)
+pytest
+
+# 5. Run linting and type checking
+black .
+mypy conductor/
+flake8 conductor/ tests/
+```
 
 ---
 
@@ -1272,12 +1380,13 @@ We welcome contributions! Here's how:
 4. **Run linter and type checker**:
    ```bash
    black .
-   mypy src/
-   flake8 .
+   mypy conductor/
+   flake8 conductor/ tests/
    ```
 5. **Run tests**:
    ```bash
-   pytest tests/ --cov=conductor
+   CONDUCTOR_TEST_DATABASE_URL=postgresql://conductor:conductor@localhost:5432/conductor_test pytest
+   ```
    ```
 6. **Submit a pull request** with a clear description
 
