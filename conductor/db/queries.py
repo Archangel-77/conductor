@@ -630,5 +630,17 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
 
     asyncpg ``Record`` objects are dict-like but not serialisable via
     ``json.dumps`` out-of-the-box.  This normalises them.
+
+    On Python 3.14+, asyncpg 0.31 returns ``JSON`` / ``JSONB`` columns
+    as plain strings rather than parsed ``dict`` objects.  We
+    auto-deserialise any string value that looks like JSON so that
+    callers always receive ``dict`` for JSONB fields.
     """
-    return dict(row) if row is not None else {}
+    result: dict[str, Any] = dict(row) if row is not None else {}
+    for key, val in result.items():
+        if isinstance(val, str) and len(val) > 0 and val[0] in ("{", "["):
+            try:
+                result[key] = json.loads(val)
+            except (json.JSONDecodeError, TypeError):
+                pass  # keep original string
+    return result

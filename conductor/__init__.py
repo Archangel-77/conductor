@@ -31,9 +31,9 @@ from conductor.exceptions import (
 )
 
 from conductor.core.queue import TaskQueue
+from conductor.core.worker import Worker
 
 # The following will be uncommented as those modules are implemented:
-# from conductor.core.worker import Worker
 # from conductor.dlq.dead_letter_queue import DeadLetterQueue
 
 __all__: list[str] = [
@@ -56,10 +56,10 @@ __all__: list[str] = [
     "TaskError",
     "TaskQueue",
     "TaskStatus",
+    "Worker",
     "WorkerError",
     "WorkerInfo",
     "WorkerStatus",
     # To be added:
     # "DeadLetterQueue",
-    # "Worker",
 ]

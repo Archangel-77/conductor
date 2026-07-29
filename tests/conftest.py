@@ -116,7 +116,7 @@ def sample_retry_record_dict() -> dict[str, Any]:
 # Integration-test fixtures (database required)
 # ---------------------------------------------------------------------------
 
-@pytest_asyncio.fixture(scope="session")
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def db_pool(  # noqa: N802  # pylint: disable=redefined-outer-name
 ) -> AsyncGenerator[Any, None]:
     """Create a :class:`DatabasePool` connected to the test database.

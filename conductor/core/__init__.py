@@ -16,9 +16,7 @@ from conductor.core.models import (
 )
 
 from conductor.core.queue import TaskQueue
-
-# The following will be uncommented as those modules are implemented:
-# from conductor.core.worker import Worker
+from conductor.core.worker import Worker
 
 __all__: list[str] = [
     "Task",
@@ -30,5 +28,5 @@ __all__: list[str] = [
     "WorkerStatus",
     "BackoffStrategyType",
     "RetryPolicy",
-    # "Worker",
+    "Worker",
 ]

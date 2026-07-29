@@ -21,14 +21,17 @@ from conductor.core.models import (
 from conductor.core.queue import TaskQueue
 from conductor.exceptions import ConductorConnectionError, TaskError
 
-pytestmark = pytest.mark.integration
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.asyncio(loop_scope="module"),
+]
 
 
 # ===================================================================
 # Fixtures
 # ===================================================================
 
-@pytest_asyncio.fixture(scope="module")
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
 async def queue() -> Any:
     """Create a TaskQueue connected to the test database.
 
@@ -57,7 +60,7 @@ async def queue() -> Any:
     await q.disconnect()
 
 
-@pytest_asyncio.fixture(autouse=True)
+@pytest_asyncio.fixture(autouse=True, loop_scope="module")
 async def cleanup_tasks(queue: Any) -> Any:
     """Clean up all task data after each test."""
     yield
