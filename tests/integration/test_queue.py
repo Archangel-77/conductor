@@ -31,8 +31,8 @@ pytestmark = [
 # Fixtures
 # ===================================================================
 
-@pytest_asyncio.fixture(scope="module", loop_scope="module")
-async def queue() -> Any:
+@pytest_asyncio.fixture(scope="module", loop_scope="module", name="queue")
+async def _queue_factory() -> Any:
     """Create a TaskQueue connected to the test database.
 
     Skips the test if the database is not running.
@@ -61,14 +61,14 @@ async def queue() -> Any:
 
 
 @pytest_asyncio.fixture(autouse=True, loop_scope="module")
-async def cleanup_tasks(queue: Any) -> Any:
+async def _cleanup(queue: Any) -> Any:
     """Clean up all task data after each test."""
     yield
     if queue.is_connected:
-        await queue._pool.execute("DELETE FROM conductor_retries")
-        await queue._pool.execute("DELETE FROM conductor_dead_letter")
-        await queue._pool.execute("DELETE FROM conductor_tasks")
-        await queue._pool.execute("DELETE FROM conductor_workers")
+        await queue.execute_raw("DELETE FROM conductor_retries")
+        await queue.execute_raw("DELETE FROM conductor_dead_letter")
+        await queue.execute_raw("DELETE FROM conductor_tasks")
+        await queue.execute_raw("DELETE FROM conductor_workers")
 
 
 # ===================================================================
@@ -126,8 +126,7 @@ class TestTaskQueueIntegration:
         task_id = await queue.submit("status_test", {"x": 1})
 
         # Move to processing
-        from conductor.db.queries import QueryBuilder
-        qb = QueryBuilder(queue._pool)
+        qb = queue.query_builder
         await qb.update_task_status(
             task_id, "processing", worker_id="test-worker",
         )
@@ -151,9 +150,7 @@ class TestTaskQueueIntegration:
         """Completed tasks should appear in the completed list."""
         task_id = await queue.submit("complete_me", {"go": True})
 
-        from conductor.db.queries import QueryBuilder
-        qb = QueryBuilder(queue._pool)
-        await qb.update_task_status(task_id, "completed", result={"ok": True})
+        await queue.query_builder.update_task_status(task_id, "completed", result={"ok": True})
 
         completed = await queue.list_completed_tasks()
         ids = [t.task_id for t in completed]
@@ -163,9 +160,7 @@ class TestTaskQueueIntegration:
         """Failed tasks should appear in the failed list."""
         task_id = await queue.submit("fail_me", {"bad": True})
 
-        from conductor.db.queries import QueryBuilder
-        qb = QueryBuilder(queue._pool)
-        await qb.update_task_status(
+        await queue.query_builder.update_task_status(
             task_id, "failed", error_message="Intentional failure",
         )
 

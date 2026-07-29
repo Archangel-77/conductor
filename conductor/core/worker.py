@@ -211,7 +211,7 @@ class Worker:
             raise ValueError("task_type must not be empty")
 
         def decorator(func: HandlerFunc) -> HandlerFunc:
-            if not asyncio.iscoroutinefunction(func):
+            if not inspect.iscoroutinefunction(func):
                 raise ValueError(
                     f"Handler for '{task_type}' must be an async function. "
                     f"Got {type(func).__name__}."
@@ -822,18 +822,14 @@ async def _call_handler(
     handler: HandlerFunc,
     payload: dict[str, Any],
 ) -> tuple[Optional[dict[str, Any]], Optional[Exception]]:
-    """Call ``handler(payload)`` and return ``(result, exception)``.
-
-    On success, *result* is the handler's return value and *exception*
-    is ``None``.  On failure, *result* is ``None`` and *exception*
-    is the caught ``Exception``.
-    """
+    """Call ``handler(payload)`` and return ``(result, exception)``."""
+    result: Optional[dict[str, Any]] = None
+    error: Optional[Exception] = None
     try:
         result = await handler(payload)
-        return (result, None)
     except Exception as exc:
-        # Intentionally catch all handler exceptions — this is a shim helper
-        return (None, exc)
+        error = exc
+    return (result, error)
 
 
 async def _send_heartbeat(
@@ -845,10 +841,7 @@ async def _send_heartbeat(
     tasks_processed_total: int,
     tasks_failed_total: int,
 ) -> Optional[Exception]:
-    """Send a worker heartbeat and return any exception that was raised.
-
-    Returns ``None`` if the heartbeat was sent successfully.
-    """
+    """Send a worker heartbeat and return any exception that was raised."""
     try:
         await queries.update_worker_heartbeat(
             worker_id,
@@ -860,7 +853,6 @@ async def _send_heartbeat(
         )
         return None
     except Exception as exc:
-        # Intentionally catch all DB exceptions — this is a shim helper
         return exc
 
 

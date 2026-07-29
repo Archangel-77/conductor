@@ -42,8 +42,8 @@ pytestmark = [
 # Fixtures
 # ===================================================================
 
-@pytest_asyncio.fixture(scope="module", loop_scope="module")
-async def task_queue() -> Any:
+@pytest_asyncio.fixture(scope="module", loop_scope="module", name="task_queue")
+async def _task_queue_factory() -> Any:
     """Create a TaskQueue connected to the test database.
 
     Used to submit tasks that the worker will poll for.
@@ -72,14 +72,14 @@ async def task_queue() -> Any:
 
 
 @pytest_asyncio.fixture(autouse=True, loop_scope="module")
-async def cleanup_data(task_queue: Any) -> Any:
+async def _cleanup_test_data(task_queue: Any) -> Any:
     """Clean up all data after each test."""
     yield
     if task_queue.is_connected:
-        await task_queue._pool.execute("DELETE FROM conductor_retries")  # noqa: SLF001
-        await task_queue._pool.execute("DELETE FROM conductor_dead_letter")  # noqa: SLF001
-        await task_queue._pool.execute("DELETE FROM conductor_tasks")  # noqa: SLF001
-        await task_queue._pool.execute("DELETE FROM conductor_workers")  # noqa: SLF001
+        await task_queue.execute_raw("DELETE FROM conductor_retries")
+        await task_queue.execute_raw("DELETE FROM conductor_dead_letter")
+        await task_queue.execute_raw("DELETE FROM conductor_tasks")
+        await task_queue.execute_raw("DELETE FROM conductor_workers")
 
 
 # ===================================================================
@@ -471,7 +471,7 @@ class TestRetryAndDLQ:
         assert task is not None
         assert task.status == TaskStatus.FAILED
 
-        dlq_row = await task_queue._queries.select_dlq_task(task_id)  # noqa: SLF001
+        dlq_row = await task_queue.query_builder.select_dlq_task(task_id)  # noqa: SLF001
         assert dlq_row is not None
         assert dlq_row["task_id"] == task_id
 
@@ -501,7 +501,7 @@ class TestRetryAndDLQ:
         assert task is not None
         assert task.status == TaskStatus.FAILED
 
-        dlq_row = await task_queue._queries.select_dlq_task(task_id)  # noqa: SLF001
+        dlq_row = await task_queue.query_builder.select_dlq_task(task_id)  # noqa: SLF001
         assert dlq_row is not None
 
 
@@ -560,7 +560,7 @@ class TestHeartbeat:
             run_task = asyncio.create_task(worker.run())
             await asyncio.sleep(0.6)
 
-            row = await task_queue._queries.select_worker(  # noqa: SLF001
+            row = await task_queue.query_builder.select_worker(  # noqa: SLF001
                 "heartbeat-test",
             )
             assert row is not None
@@ -591,7 +591,7 @@ class TestHeartbeat:
             run_task = asyncio.create_task(worker.run())
             await asyncio.sleep(0.8)
 
-            row = await task_queue._queries.select_worker(  # noqa: SLF001
+            row = await task_queue.query_builder.select_worker(  # noqa: SLF001
                 "heartbeat-busy-test",
             )
             assert row is not None
@@ -615,7 +615,7 @@ class TestHeartbeat:
             await worker.shutdown()
             await run_task
 
-        row = await task_queue._queries.select_worker("final-hb-test")  # noqa: SLF001
+        row = await task_queue.query_builder.select_worker("final-hb-test")  # noqa: SLF001
         assert row is not None
         assert row["status"] == "unhealthy"
 

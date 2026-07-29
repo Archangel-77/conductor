@@ -367,6 +367,37 @@ class TaskQueue:
                 "'async with TaskQueue(...)'."
             )
 
+    # ------------------------------------------------------------------
+    # Public helpers for test infrastructure
+    # ------------------------------------------------------------------
+
+    async def execute_raw(self, query: str, *args: Any) -> str:
+        """Execute a raw SQL statement.
+
+        Primarily intended for test cleanup (``DELETE``, ``TRUNCATE``).
+        """
+        if not self._connected:
+            raise TaskError("TaskQueue is not connected.")
+        return await self._pool.execute(query, *args)
+
+    @property
+    def query_builder(self) -> QueryBuilder:
+        """Return the ``QueryBuilder`` for direct query access.
+
+        Provides test code with direct access to query methods for
+        verification purposes.
+
+        Raises:
+            TaskError: If not connected.
+        """
+        queries = self._queries
+        if queries is None:
+            raise TaskError(
+                "TaskQueue is not connected. Call connect() or use "
+                "'async with TaskQueue(...)'."
+            )
+        return queries
+
 
 # ---------------------------------------------------------------------------
 # Module-level helpers

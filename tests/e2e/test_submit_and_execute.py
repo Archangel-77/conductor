@@ -37,8 +37,8 @@ pytestmark = [
 # Fixtures
 # ===================================================================
 
-@pytest_asyncio.fixture(scope="module", loop_scope="module")
-async def task_queue() -> Any:
+@pytest_asyncio.fixture(scope="module", loop_scope="module", name="task_queue")
+async def _task_queue_factory() -> Any:
     """Create a TaskQueue connected to the test database."""
     from tests.conftest import TEST_DATABASE_URL, db_available
 
@@ -63,14 +63,14 @@ async def task_queue() -> Any:
 
 
 @pytest_asyncio.fixture(autouse=True, loop_scope="module")
-async def cleanup_data(task_queue: Any) -> Any:
+async def _cleanup_test_data(task_queue: Any) -> Any:
     """Clean up all data after each test."""
     yield
     if task_queue.is_connected:
-        await task_queue._pool.execute("DELETE FROM conductor_retries")  # noqa: SLF001
-        await task_queue._pool.execute("DELETE FROM conductor_dead_letter")  # noqa: SLF001
-        await task_queue._pool.execute("DELETE FROM conductor_tasks")  # noqa: SLF001
-        await task_queue._pool.execute("DELETE FROM conductor_workers")  # noqa: SLF001
+        await task_queue.execute_raw("DELETE FROM conductor_retries")
+        await task_queue.execute_raw("DELETE FROM conductor_dead_letter")
+        await task_queue.execute_raw("DELETE FROM conductor_tasks")
+        await task_queue.execute_raw("DELETE FROM conductor_workers")
 
 
 # ===================================================================
@@ -322,7 +322,7 @@ class TestRetryWorkflowE2E:
         assert task.attempt == 1
 
         # Manually move scheduled_for to now so it can be polled again
-        await task_queue._queries.update_task_status(  # noqa: SLF001
+        await task_queue.query_builder.update_task_status(  # noqa: SLF001
             task_id,
             "pending",
             attempt=1,
@@ -376,7 +376,7 @@ class TestRetryWorkflowE2E:
         assert task is not None
         assert task.status == TaskStatus.FAILED
 
-        dlq_task = await task_queue._queries.select_dlq_task(task_id)  # noqa: SLF001
+        dlq_task = await task_queue.query_builder.select_dlq_task(task_id)  # noqa: SLF001
         assert dlq_task is not None
         assert dlq_task["task_id"] == task_id
         assert dlq_task["error_message"] is not None
@@ -408,12 +408,12 @@ class TestRetryWorkflowE2E:
 
             await worker.run_once()
 
-        dlq_task = await task_queue._queries.select_dlq_task(task_id)  # noqa: SLF001
+        dlq_task = await task_queue.query_builder.select_dlq_task(task_id)  # noqa: SLF001
         assert dlq_task is not None
 
         # Simulate DLQ retry: delete from DLQ, reset task to pending
-        await task_queue._queries.delete_dlq_task(task_id)  # noqa: SLF001
-        await task_queue._queries.update_task_status(  # noqa: SLF001
+        await task_queue.query_builder.delete_dlq_task(task_id)  # noqa: SLF001
+        await task_queue.query_builder.update_task_status(  # noqa: SLF001
             task_id,
             "pending",
             attempt=0,
