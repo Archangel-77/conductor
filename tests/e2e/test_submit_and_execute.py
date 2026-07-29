@@ -13,6 +13,8 @@ Workflows tested:
 - Task status transitions end-to-end
 """
 
+# pylint: disable=missing-class-docstring,import-outside-toplevel
+
 from __future__ import annotations
 
 import asyncio
@@ -322,7 +324,7 @@ class TestRetryWorkflowE2E:
         assert task.attempt == 1
 
         # Manually move scheduled_for to now so it can be polled again
-        await task_queue.query_builder.update_task_status(  # noqa: SLF001
+        await task_queue.query_builder.update_task_status(  # pylint: disable=protected-access
             task_id,
             "pending",
             attempt=1,
@@ -376,7 +378,7 @@ class TestRetryWorkflowE2E:
         assert task is not None
         assert task.status == TaskStatus.FAILED
 
-        dlq_task = await task_queue.query_builder.select_dlq_task(task_id)  # noqa: SLF001
+        dlq_task = await task_queue.query_builder.select_dlq_task(task_id)  # pylint: disable=protected-access
         assert dlq_task is not None
         assert dlq_task["task_id"] == task_id
         assert dlq_task["error_message"] is not None
@@ -408,12 +410,12 @@ class TestRetryWorkflowE2E:
 
             await worker.run_once()
 
-        dlq_task = await task_queue.query_builder.select_dlq_task(task_id)  # noqa: SLF001
+        dlq_task = await task_queue.query_builder.select_dlq_task(task_id)  # pylint: disable=protected-access
         assert dlq_task is not None
 
         # Simulate DLQ retry: delete from DLQ, reset task to pending
-        await task_queue.query_builder.delete_dlq_task(task_id)  # noqa: SLF001
-        await task_queue.query_builder.update_task_status(  # noqa: SLF001
+        await task_queue.query_builder.delete_dlq_task(task_id)  # pylint: disable=protected-access
+        await task_queue.query_builder.update_task_status(  # pylint: disable=protected-access
             task_id,
             "pending",
             attempt=0,

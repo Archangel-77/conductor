@@ -7,6 +7,7 @@ Divided into two tiers:
 - **Integration-test fixtures** – require a running PostgreSQL instance
   (skipped automatically if the database is unavailable)
 """
+# pylint: disable=import-outside-toplevel
 
 from __future__ import annotations
 
@@ -14,12 +15,12 @@ import os
 from collections.abc import AsyncGenerator
 from typing import Any, TYPE_CHECKING
 
+import pytest
+import pytest_asyncio
+
 if TYPE_CHECKING:
     from conductor.db.connection import DatabasePool
     from conductor.db.schema import SchemaManager
-
-import pytest
-import pytest_asyncio
 
 # ---------------------------------------------------------------------------
 # Environment helpers

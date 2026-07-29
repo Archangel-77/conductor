@@ -827,7 +827,7 @@ async def _call_handler(
     error: Optional[Exception] = None
     try:
         result = await handler(payload)
-    except Exception as exc:
+    except Exception as exc:  # pylint: disable=broad-exception-caught
         error = exc
     return (result, error)
 
@@ -852,7 +852,7 @@ async def _send_heartbeat(
             tasks_failed_total=tasks_failed_total,
         )
         return None
-    except Exception as exc:
+    except Exception as exc:  # pylint: disable=broad-exception-caught
         return exc
 
 

@@ -381,7 +381,7 @@ class TaskQueue:
         return await self._pool.execute(query, *args)
 
     @property
-    def query_builder(self) -> QueryBuilder:
+    def query_builder(self) -> QueryBuilder:  # pylint: disable=protected-access
         """Return the ``QueryBuilder`` for direct query access.
 
         Provides test code with direct access to query methods for
