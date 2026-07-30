@@ -37,6 +37,8 @@ from conductor.core.worker import Worker
 
 from conductor.dlq.dead_letter_queue import DeadLetterQueue
 
+from conductor.observability.health import HealthChecker, HealthResult, HealthStatus
+
 __all__: list[str] = [
     "BackoffStrategyType",
     "ConductorConnectionError",
@@ -46,6 +48,9 @@ __all__: list[str] = [
     "DLQTask",
     "ExponentialBackoff",
     "FixedBackoff",
+    "HealthChecker",
+    "HealthResult",
+    "HealthStatus",
     "LinearBackoff",
     "PoolConfig",
     "QueryBuilder",

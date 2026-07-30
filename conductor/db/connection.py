@@ -192,7 +192,11 @@ class DatabasePool:
                 val = await conn.fetchval("SELECT 1 AS ok")
                 return cast(bool, val == 1)
         except (OSError, asyncpg.PostgresError) as exc:
-            logger.error("Health check failed: %s", exc)
+            logger.error(
+                "Health check failed: %s",
+                exc,
+                extra={"error": str(exc)},
+            )
             return False
 
     # ------------------------------------------------------------------

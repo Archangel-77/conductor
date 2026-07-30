@@ -23,6 +23,7 @@ from conductor.db.connection import DatabasePool
 from conductor.db.queries import QueryBuilder
 from conductor.db.schema import SchemaManager
 from conductor.exceptions import TaskError
+from conductor.observability.metrics import inc_tasks_submitted
 
 logger = logging.getLogger("conductor.core.queue")
 
@@ -82,13 +83,19 @@ class TaskQueue:
         await SchemaManager(self._pool).ensure_schema()
         self._queries = QueryBuilder(self._pool)
         self._connected = True
-        logger.info("TaskQueue connected to database.")
+        logger.info(
+            "TaskQueue connected to database.",
+            extra={"component": "TaskQueue"},
+        )
 
     async def disconnect(self) -> None:
         """Close the database connection."""
         await self._pool.disconnect()
         self._connected = False
-        logger.info("TaskQueue disconnected.")
+        logger.info(
+            "TaskQueue disconnected.",
+            extra={"component": "TaskQueue"},
+        )
 
     @property
     def is_connected(self) -> bool:
@@ -167,7 +174,16 @@ class TaskQueue:
 
         db_dict = _task_to_db_dict(task)
         inserted_id = await self._query.insert_task(db_dict)
-        logger.info("Task submitted: %s (%s)", inserted_id, task_type)
+        inc_tasks_submitted(task_type)
+        logger.info(
+            "Task submitted: %s (%s)",
+            inserted_id,
+            task_type,
+            extra={
+                "task_id": inserted_id,
+                "task_type": task_type,
+            },
+        )
         return inserted_id
 
     async def submit_many(
@@ -235,10 +251,15 @@ class TaskQueue:
                 for db_dict in task_dicts:
                     inserted_id = await self._query.insert_task(db_dict)
                     task_ids.append(inserted_id)
+                    inc_tasks_submitted(db_dict["task_type"])
                     logger.info(
                         "Task submitted: %s (%s)",
                         inserted_id,
                         db_dict["task_type"],
+                        extra={
+                            "task_id": inserted_id,
+                            "task_type": db_dict["task_type"],
+                        },
                     )
 
         return task_ids
@@ -420,8 +441,6 @@ class TaskQueue:
                 scheduled_for=now,
             )
         else:
-            from conductor.core.models import RetryPolicy
-
             rp = RetryPolicy.from_dict(dlq_row.get("retry_policy", {}))
             task_dict: dict[str, Any] = {
                 "task_id": task_id,
@@ -443,7 +462,11 @@ class TaskQueue:
             }
             await self._query.insert_task(task_dict)
 
-        logger.info("Task %s retried from DLQ.", task_id)
+        logger.info(
+            "Task %s retried from DLQ.",
+            task_id,
+            extra={"task_id": task_id},
+        )
         return task_id
 
     async def discard_dlq_task(
@@ -471,6 +494,10 @@ class TaskQueue:
             "Task %s discarded from DLQ (reason: %s).",
             task_id,
             reason or "no reason given",
+            extra={
+                "task_id": task_id,
+                "reason": reason,
+            },
         )
 
     async def count_dlq_tasks(self, include_discarded: bool = False) -> int:

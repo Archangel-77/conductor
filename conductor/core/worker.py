@@ -41,6 +41,14 @@ from conductor.core.models import (
 from conductor.db.connection import DatabasePool
 from conductor.db.queries import QueryBuilder
 from conductor.db.schema import SchemaManager
+from conductor.observability.metrics import (
+    inc_tasks_completed,
+    inc_tasks_failed,
+    inc_tasks_retried,
+    observe_task_duration,
+)
+from conductor.observability.health import HealthChecker
+from conductor.observability.metrics import MetricsExporter
 
 logger = logging.getLogger("conductor.core.worker")
 
@@ -77,6 +85,9 @@ class Worker:
         command_timeout: float = 60.0,
         heartbeat_interval: float = 10.0,
         graceful_shutdown_timeout: float = 30.0,
+        metrics_port: int = 8000,
+        metrics_enabled: bool = True,
+        health_enabled: bool = True,
     ) -> None:
         # Worker identity
         hostname = get_hostname()
@@ -91,6 +102,9 @@ class Worker:
         self._routes = routes or ["default"]
         self._heartbeat_interval = heartbeat_interval
         self._graceful_shutdown_timeout = graceful_shutdown_timeout
+        self._metrics_port = metrics_port
+        self._metrics_enabled = metrics_enabled
+        self._health_enabled = health_enabled
 
         # Apply log level
         logging.getLogger("conductor").setLevel(log_level.upper())
@@ -124,6 +138,9 @@ class Worker:
         self._tasks_failed_total = 0
         self._current_task_id: Optional[str] = None
 
+        # Observability
+        self._metrics_exporter: Optional[MetricsExporter] = None
+
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
@@ -151,13 +168,18 @@ class Worker:
         logger.info(
             "Worker '%s' connected to database.",
             self._worker_id,
+            extra={"worker_id": self._worker_id},
         )
 
     async def disconnect(self) -> None:
         """Close the database connection."""
         await self._pool.disconnect()
         self._connected = False
-        logger.info("Worker '%s' disconnected.", self._worker_id)
+        logger.info(
+            "Worker '%s' disconnected.",
+            self._worker_id,
+            extra={"worker_id": self._worker_id},
+        )
 
     @property
     def is_connected(self) -> bool:
@@ -273,6 +295,25 @@ class Worker:
             name=f"worker-heartbeat-{self._worker_id}",
         )
 
+        # Start metrics/health HTTP server
+        if self._metrics_enabled or self._health_enabled:
+            health_checker = HealthChecker(self._pool)
+            self._metrics_exporter = MetricsExporter(
+                pool=self._pool,
+                health_checker=health_checker,
+                port=self._metrics_port,
+            )
+            try:
+                await self._metrics_exporter.start()
+            except OSError as exc:
+                logger.warning(
+                    "Failed to start metrics/health server on port %d: %s. "
+                    "Worker will continue without it.",
+                    self._metrics_port,
+                    exc,
+                )
+                self._metrics_exporter = None
+
         # Set up signal handlers for graceful shutdown
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -293,7 +334,7 @@ class Worker:
                 )
 
         logger.info(
-            "Worker '%s' started. Polling every %.2fs, " "concurrency=%d, routes=%s",
+            "Worker '%s' started. Polling every %.2fs, concurrency=%d, routes=%s",
             self._worker_id,
             self._poll_interval,
             self._concurrency,
@@ -430,6 +471,7 @@ class Worker:
         result, handler_exc = await _call_handler(handler, task.payload)
         if handler_exc is not None:
             duration_ms = (time.monotonic() - start_time) * 1000
+            duration_sec = duration_ms / 1000.0
             error_msg = str(handler_exc)
             logger.error(
                 "Task %s (%s) failed after %.0fms: %s",
@@ -437,13 +479,22 @@ class Worker:
                 task_type,
                 duration_ms,
                 error_msg,
+                extra={
+                    "task_id": task.task_id,
+                    "task_type": task_type,
+                    "duration_ms": duration_ms,
+                    "error": error_msg,
+                },
             )
+            inc_tasks_failed(task_type)
+            observe_task_duration(task_type, duration_sec)
             await self._handle_task_failure(task, error_msg)
             self._tasks_failed_total += 1
             self._current_task_id = None
             return
 
         duration_ms = (time.monotonic() - start_time) * 1000
+        duration_sec = duration_ms / 1000.0
 
         # Update task status to "completed"
         await queries.update_task_status(
@@ -456,11 +507,19 @@ class Worker:
         self._tasks_processed_total += 1
         self._current_task_id = None
 
+        inc_tasks_completed(task_type)
+        observe_task_duration(task_type, duration_sec)
+
         logger.info(
             "Task %s (%s) completed in %.0fms.",
             task.task_id,
             task_type,
             duration_ms,
+            extra={
+                "task_id": task.task_id,
+                "task_type": task_type,
+                "duration_ms": duration_ms,
+            },
         )
 
     async def _handle_task_failure(
@@ -512,12 +571,20 @@ class Worker:
                 scheduled_for=scheduled_dt,
             )
 
+            inc_tasks_retried(task.task_type)
+
             logger.info(
                 "Task %s failed (attempt %d/%d). Retrying in %.2fs.",
                 task.task_id,
                 new_attempt,
                 task.max_retries,
                 delay,
+                extra={
+                    "task_id": task.task_id,
+                    "task_type": task.task_type,
+                    "attempt": new_attempt,
+                    "delay": delay,
+                },
             )
         else:
             # Max retries exceeded — move to dead-letter queue
@@ -545,11 +612,17 @@ class Worker:
             )
 
             logger.warning(
-                "Task %s (%s) moved to DLQ after %d attempts. " "Last error: %s",
+                "Task %s (%s) moved to DLQ after %d attempts. Last error: %s",
                 task.task_id,
                 task.task_type,
                 new_attempt,
                 error_message,
+                extra={
+                    "task_id": task.task_id,
+                    "task_type": task.task_type,
+                    "attempts": new_attempt,
+                    "error": error_message,
+                },
             )
 
     async def _update_status(
@@ -629,12 +702,23 @@ class Worker:
                     self._tasks_processed_total,
                     self._tasks_failed_total,
                     uptime,
+                    extra={
+                        "worker_id": self._worker_id,
+                        "status": current_status,
+                        "tasks_processed": self._tasks_processed_total,
+                        "tasks_failed": self._tasks_failed_total,
+                        "uptime_seconds": uptime,
+                    },
                 )
             else:
                 logger.error(
                     "Heartbeat failed for worker '%s': %s",
                     self._worker_id,
                     hb_error,
+                    extra={
+                        "worker_id": self._worker_id,
+                        "error": str(hb_error),
+                    },
                 )
 
             await asyncio.sleep(self._heartbeat_interval)
@@ -673,7 +757,7 @@ class Worker:
         # Wait for in-flight tasks to complete (with timeout)
         if self._in_flight_tasks:
             logger.info(
-                "Waiting for %d in-flight task(s) to complete " "(timeout: %.0fs)...",
+                "Waiting for %d in-flight task(s) to complete (timeout: %.0fs)...",
                 len(self._in_flight_tasks),
                 self._graceful_shutdown_timeout,
             )
@@ -685,7 +769,7 @@ class Worker:
 
             if pending:
                 logger.warning(
-                    "%d task(s) did not complete within the " "shutdown timeout. Cancelling...",
+                    "%d task(s) did not complete within the shutdown timeout. Cancelling...",
                     len(pending),
                 )
                 for t in pending:
@@ -712,11 +796,15 @@ class Worker:
                     final_error,
                 )
 
+        # Stop metrics/health HTTP server
+        if self._metrics_exporter is not None:
+            await self._metrics_exporter.stop()
+
         # Disconnect from database
         await self.disconnect()
 
         logger.info(
-            "Worker '%s' shut down. " "Processed=%d, Failed=%d",
+            "Worker '%s' shut down. Processed=%d, Failed=%d",
             self._worker_id,
             self._tasks_processed_total,
             self._tasks_failed_total,

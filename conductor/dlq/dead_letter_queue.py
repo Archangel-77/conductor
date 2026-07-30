@@ -80,13 +80,19 @@ class DeadLetterQueue:
         await SchemaManager(self._pool).ensure_schema()
         self._queries = QueryBuilder(self._pool)
         self._connected = True
-        logger.info("DeadLetterQueue connected to database.")
+        logger.info(
+            "DeadLetterQueue connected to database.",
+            extra={"component": "DeadLetterQueue"},
+        )
 
     async def disconnect(self) -> None:
         """Close the database connection."""
         await self._pool.disconnect()
         self._connected = False
-        logger.info("DeadLetterQueue disconnected.")
+        logger.info(
+            "DeadLetterQueue disconnected.",
+            extra={"component": "DeadLetterQueue"},
+        )
 
     @property
     def is_connected(self) -> bool:
@@ -217,7 +223,11 @@ class DeadLetterQueue:
             }
             await self._query.insert_task(task_dict)
 
-        logger.info("Task %s retried from DLQ (resubmitted as pending).", task_id)
+        logger.info(
+            "Task %s retried from DLQ (resubmitted as pending).",
+            task_id,
+            extra={"task_id": task_id},
+        )
         return task_id
 
     async def discard_task(
@@ -249,6 +259,10 @@ class DeadLetterQueue:
             "Task %s discarded from DLQ (reason: %s).",
             task_id,
             reason or "no reason given",
+            extra={
+                "task_id": task_id,
+                "reason": reason,
+            },
         )
 
     async def count(self, include_discarded: bool = False) -> int:

@@ -6,13 +6,15 @@ Structured logging, Prometheus metrics, and health checks.
 
 from __future__ import annotations
 
-# Observability modules will be implemented in Sprint 5.
-# from conductor.observability.logging import StructuredLogger
-# from conductor.observability.metrics import MetricsExporter
-# from conductor.observability.health import HealthChecker
+from conductor.observability.logging import JsonFormatter, setup_logging
+from conductor.observability.metrics import MetricsExporter
+from conductor.observability.health import HealthChecker, HealthResult, HealthStatus
 
 __all__: list[str] = [
-    # "StructuredLogger",
-    # "MetricsExporter",
-    # "HealthChecker",
+    "HealthChecker",
+    "HealthResult",
+    "HealthStatus",
+    "JsonFormatter",
+    "MetricsExporter",
+    "setup_logging",
 ]
