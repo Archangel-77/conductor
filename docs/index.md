@@ -18,3 +18,7 @@ PostgreSQL — no Redis, no message broker.
 ## Repository
 
 - [README](../README.md) — overview, quick start, comparison
+- [Contributing](../CONTRIBUTING.md) — development setup, tests, code style
+- [Code of Conduct](../CODE_OF_CONDUCT.md) — community standards
+- [Security](../SECURITY.md) — reporting vulnerabilities
+- [License](../LICENSE) — MIT

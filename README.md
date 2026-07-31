@@ -1290,43 +1290,13 @@ flake8 conductor/ tests/
 
 ## Contributing
 
-We welcome contributions! Here's how:
+We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for the full
+guide — development setup, how to run tests, code style, and the pull request
+process.
 
-1. **Fork the repository** on GitHub
-2. **Create a feature branch** (`git checkout -b feature/amazing-feature`)
-3. **Write tests** for your changes (aim for 85%+ coverage)
-4. **Run linter and type checker**:
-   ```bash
-   black .
-   mypy conductor/
-   flake8 conductor/ tests/
-   ```
-5. **Run tests**:
-   ```bash
-   CONDUCTOR_TEST_DATABASE_URL=postgresql://conductor:conductor@localhost:5432/conductor_test pytest
-   ```
-   ```
-6. **Submit a pull request** with a clear description
-
-### Development Setup
-
-```bash
-# Clone repo
-git clone https://github.com/yourusername/conductor.git
-cd conductor
-
-# Install dev dependencies
-pip install -e ".[dev]"
-
-# Run tests
-pytest
-
-# Run type checker
-mypy src/
-
-# Format code
-black src/ tests/
-```
+- 📄 [CONTRIBUTING.md](CONTRIBUTING.md) — how to contribute
+- 🛡️ [SECURITY.md](SECURITY.md) — how to report a vulnerability
+- 🤝 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — our community standards
 
 ### Areas for Contribution
 

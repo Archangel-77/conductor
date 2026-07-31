@@ -1,0 +1,16 @@
+# CI-only override for docker-compose.yml.
+#
+# Attaches a smoke-test handler to the compose worker so the "tasks
+# execute" acceptance check can run end-to-end through the real worker
+# container. Not part of the shipped example.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f tests/docker/compose.ci.yml up -d --build
+
+services:
+  worker:
+    environment:
+      CONDUCTOR_HANDLERS_MODULE: handlers
+      PYTHONPATH: /app
+    volumes:
+      - ${PWD:-.}/tests/docker/handlers.py:/app/handlers.py:ro
