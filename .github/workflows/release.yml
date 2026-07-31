@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  # Required for trusted publishing (OIDC) with PyPI.
+  id-token: write
 
 jobs:
   publish:
@@ -26,12 +28,14 @@ jobs:
       - name: Build sdist and wheel
         run: python -m build
 
-      - name: Publish to PyPI
+      - name: Extract release notes from CHANGELOG
+        run: python scripts/extract_release_notes.py
+
+      - name: Publish to PyPI (trusted publishing)
         uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          password: ${{ secrets.PYPI_API_TOKEN }}
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: release_body.md
+          files: dist/*

@@ -37,6 +37,7 @@ conductor = "conductor.cli:main"
 [project.optional-dependencies]
 dev = [
     "setuptools>=68.0.0",
+    "build>=1.0.0",
     "pyyaml>=6.0",
     "types-PyYAML>=6.0.12",
     "pytest>=8.0.0",
@@ -52,7 +53,10 @@ dev = [
 "Source Code" = "https://github.com/Archangel-77/Conductor"
 
 [tool.setuptools.packages.find]
-exclude = ["tests*", "examples*", "docs*"]
+exclude = ["tests*", "examples*", "docs*", "scripts*"]
+
+[tool.setuptools.package-data]
+conductor = ["py.typed"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

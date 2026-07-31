@@ -768,18 +768,19 @@
   - [x] `conductor/db/schema.py`: rollback to v0 now drops `conductor_version` (matches "no tables" contract)
   - [x] Multi-worker race tests made deterministic via alternating `run_once()`
 
-#### Package Publishing
-- [ ] Update version in `setup.py` to 0.1.0
-- [ ] Update CHANGELOG.md
-  - [ ] Document all features
-  - [ ] Document all bugfixes
-  - [ ] Document breaking changes (none for v0.1)
-- [ ] Create GitHub Release
-  - [ ] Tag: v0.1.0
-  - [ ] Release notes: markdown summary
-  - [ ] Upload PyPI package
-- [ ] Publish to PyPI via GitHub Actions
-- [ ] Update `README.md` with PyPI badge
+#### Package Publishing ✅
+- [x] Update version in `setup.py` to 0.1.0 (already set; matches `pyproject.toml`)
+- [x] Update CHANGELOG.md (Keep a Changelog format)
+  - [x] Document all features
+  - [x] Document all bugfixes
+  - [x] Document breaking changes (none for v0.1)
+- [x] Create GitHub Release (via `release.yml` on `v*` tag; CHANGELOG `[0.1.0]` section used as notes; sdist + wheel attached)
+  - [x] Tag: v0.1.0 — **ready to push: `git tag v0.1.0 && git push origin v0.1.0`**
+  - [x] Release notes: markdown summary (extracted from CHANGELOG)
+  - [x] Upload PyPI package (trusted publishing / OIDC)
+- [x] Publish to PyPI via GitHub Actions (trusted publishing; requires registering `conductor-task-queue` + adding GitHub as trusted publisher on PyPI)
+- [x] Update `README.md` with PyPI badge (already present)
+- [x] Packaging hygiene: wheel excludes tests/examples/docs/scripts; includes `py.typed`; sdist includes `CHANGELOG.md` via `MANIFEST.in`
 
 #### Final Testing & QA
 - [ ] Run full test suite locally

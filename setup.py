@@ -19,7 +19,8 @@ setup(
     url="https://github.com/Archangel-77/Conductor",
     license="MIT",
     license_files=("LICENSE",),
-    packages=find_packages(exclude=["tests*", "examples*", "docs*"]),
+    packages=find_packages(exclude=["tests*", "examples*", "docs*", "scripts*"]),
+    package_data={"conductor": ["py.typed"]},
     python_requires=">=3.11",
     entry_points={
         "console_scripts": [
@@ -36,6 +37,7 @@ setup(
     extras_require={
         "dev": [
             "setuptools>=68.0.0",
+            "build>=1.0.0",
             "pyyaml>=6.0",
             "types-PyYAML>=6.0.12",
             "pytest>=8.0.0",
