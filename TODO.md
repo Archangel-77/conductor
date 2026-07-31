@@ -825,8 +825,8 @@
 - [x] Integration tests pass
 - [x] Performance tests pass
 - [x] Docker Compose example works (via CI `docker` job; local machine lacks Docker)
-- [ ] Published to PyPI (external: register project + trusted publisher, then tag v0.1.0)
-- [ ] GitHub Release created (external: same tag)
+- [x] Published to PyPI — `conductor-task-queue` 0.1.0 via trusted publishing
+- [x] GitHub Release created — `v0.1.0` (CHANGELOG notes + artifacts)
 
 ---
 
@@ -1100,8 +1100,8 @@
   - [x] Documentation complete
   - [x] Examples working
   - [x] Docker image builds successfully (via CI `docker` job)
-  - [ ] Published to PyPI (external)
-  - [ ] GitHub Release created (external)
+  - [x] Published to PyPI — `conductor-task-queue` 0.1.0
+  - [x] GitHub Release created — `v0.1.0`
 
 ### Version Release Checklist
 
@@ -1111,8 +1111,8 @@
 - [x] Documentation: Complete and accurate (links verified, examples run)
 - [x] Examples: 5+, all working
 - [x] Performance: Benchmarks met
-- [ ] PyPI: Published (external — register `conductor-task-queue` + trusted publisher, then tag `v0.1.0`)
-- [ ] GitHub: Release created (external — created by `release.yml` on the `v0.1.0` tag)
+- [x] PyPI: Published — `conductor-task-queue` 0.1.0 live on PyPI via trusted publishing (2026-07-31)
+- [x] GitHub: Release created — `v0.1.0` with CHANGELOG notes + sdist/wheel attached
 - [x] License: MIT, included
 - [x] Code of Conduct: Added
 - [x] Contributing guide: Added
