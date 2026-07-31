@@ -11,6 +11,8 @@ Conductor orchestrates reliable, distributed task execution with exactly-once se
 [![Tests](https://img.shields.io/github/actions/workflow/status/Archangel-77/Conductor/test.yml?label=tests)](https://github.com/Archangel-77/Conductor/actions)
 [![Coverage](https://img.shields.io/codecov/c/github/Archangel-77/Conductor)](https://codecov.io/gh/Archangel-77/Conductor)
 
+**Documentation**: [Installation](docs/installation.md) · [Configuration](docs/configuration.md) · [API Reference](docs/api-reference.md) · [Deployment](docs/deployment.md) · [Troubleshooting](docs/troubleshooting.md) · [docs index](docs/index.md)
+
 ---
 
 - [Why Conductor?](#why-conductor)
@@ -69,7 +71,7 @@ Conductor solves this by:
 
 ✅ **No external dependencies** – PostgreSQL only. Deploy to any server, container, or serverless environment  
 ✅ **Exactly-once semantics** – Tasks execute once, guaranteed. Built-in idempotency and deduplication  
-✅ **Observable from day one** – Structured logging with task-level context, Prometheus metrics and health check endpoints (coming in v0.1)  
+✅ **Observable from day one** – Structured logging with task-level context, Prometheus metrics (`GET /metrics`) and health checks (`GET /health`)
 ✅ **Production-ready** – Exponential backoff, circuit breakers, graceful shutdown, dead letter queues  
 ✅ **Simple API** – Submit a task in one line. Register a worker in two  
 ✅ **Built for async** – Native asyncio support. No threads, no blocking calls
@@ -258,10 +260,9 @@ logger = logging.getLogger("conductor.core.worker")
 # - Task moved to DLQ (WARNING)
 ```
 
-> **Coming in v0.1 release (Sprint 5):** Structured JSON logging,
-> Prometheus metrics exporter, and health check endpoints.
-> Track progress at the
-> [GitHub repository](https://github.com/Archangel-77/Conductor).
+> Structured JSON logging, Prometheus metrics (`GET /metrics`), and health
+> checks (`GET /health`) are included and enabled by default. The worker
+> exposes them on `METRICS_PORT` (default `8000`).
 
 ### 5. Graceful Shutdown
 
@@ -368,9 +369,27 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+### Step 5: Run a Worker from the CLI (optional)
+
+The package installs a `conductor` console script that runs a worker from
+environment variables (no application code needed):
+
+```bash
+# handlers.py exposes: def register(worker): @worker.task(...) ...
+export DATABASE_URL=postgresql://user:password@localhost/conductor
+conductor worker --handlers myapp.handlers
+```
+
+`python -m conductor worker` is equivalent. See
+[docs/installation.md](docs/installation.md) for the handlers-module
+contract.
+
 ---
 
 ## Usage Examples
+
+> Complete, runnable versions of these patterns live in
+> [examples/](examples/README.md).
 
 ### Example 1: Email Notifications
 
@@ -674,7 +693,7 @@ policy = RetryPolicy.from_dict({
 ### Environment Variables
 
 ```env
-# Database
+# Database (required)
 DATABASE_URL=postgresql://postgres:password@localhost:5432/conductor
 
 # Worker
@@ -682,173 +701,72 @@ WORKER_ID=worker-1
 CONCURRENCY=10
 POLL_INTERVAL=0.5
 ROUTES=default
+HEARTBEAT_INTERVAL=10
 GRACEFUL_SHUTDOWN_TIMEOUT=30
+CONDUCTOR_HANDLERS_MODULE=
 
 # Logging
 LOG_LEVEL=INFO
 LOG_FORMAT=json
 
-# Metrics
+# Metrics & Health (shared port)
 METRICS_ENABLED=true
 METRICS_PORT=8000
-
-# Health
 HEALTH_ENABLED=true
-HEALTH_PORT=8000
 
 # Tasks
 TASK_TIMEOUT=300
 MAX_TASK_AGE=86400
 
 # Connection pool
-POOL_MIN_SIZE=2
-POOL_MAX_SIZE=10
-POOL_TIMEOUT=30
-COMMAND_TIMEOUT=60
+DB_MIN_SIZE=2
+DB_MAX_SIZE=10
+DB_TIMEOUT=30
+DB_COMMAND_TIMEOUT=60
 ```
+
+> Full reference: [docs/configuration.md](docs/configuration.md).
 
 ---
 
 ## Deployment
 
-### Docker
+Ready-to-use deployment artifacts are included in the repository and
+covered in detail in [docs/deployment.md](docs/deployment.md).
 
-```dockerfile
-FROM python:3.11-slim
+- **Docker** — a `python:3.11-slim` `Dockerfile` (non-root user, healthcheck
+  on `/health`, `ENTRYPOINT ["conductor"] CMD ["worker"]`):
+  ```bash
+  docker build -t conductor:0.1.0 .
+  docker run --rm -e DATABASE_URL=postgresql://... -p 8000:8000 conductor:0.1.0
+  ```
+- **Docker Compose** — `docker-compose.yml` (dev: PostgreSQL + worker) and
+  `docker-compose.prod.yml` (replicas, resource limits, log rotation, nightly
+  `pg_dump` backup):
+  ```bash
+  docker compose up -d --build
+  docker compose -f docker-compose.prod.yml up -d --build --scale worker=3
+  ```
+- **Kubernetes** — `examples/kubernetes.yaml` (ConfigMap, Secret, Deployment
+  with 3 replicas + liveness/readiness probes, Service):
+  ```bash
+  kubectl apply -f examples/kubernetes.yaml
+  ```
+- **systemd** — `examples/conductor-worker.service` (runs `conductor worker`):
+  ```bash
+  sudo cp examples/conductor-worker.service /etc/systemd/system/
+  sudo systemctl daemon-reload && sudo systemctl enable --now conductor-worker
+  ```
 
-WORKDIR /app
-
-# Install PostgreSQL client
-RUN apt-get update && apt-get install -y postgresql-client
-
-# Install dependencies
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-
-# Copy application
-COPY . .
-
-# Run worker
-CMD ["python", "-m", "conductor.worker"]
-```
-
-**Build and run**:
-
-```bash
-docker build -t my-conductor-worker .
-docker run -e DATABASE_URL=postgresql://... my-conductor-worker
-```
-
-### Docker Compose (Development)
-
-```yaml
-version: '3.8'
-
-services:
-  postgres:
-    image: postgres:15
-    environment:
-      POSTGRES_DB: conductor
-      POSTGRES_PASSWORD: password
-    ports:
-      - "5432:5432"
-    volumes:
-      - conductor_data:/var/lib/postgresql/data
-
-  conductor_worker:
-    build: .
-    depends_on:
-      - postgres
-    environment:
-      DATABASE_URL: postgresql://postgres:password@postgres:5432/conductor
-      LOG_LEVEL: INFO
-    command: python worker.py
-
-volumes:
-  conductor_data:
-```
-
-**Run**:
+Validate deployment files locally without Docker:
 
 ```bash
-docker-compose up
+python scripts/validate_deploy.py
 ```
 
-### Kubernetes
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: conductor-worker
-spec:
-  replicas: 3
-  selector:
-    matchLabels:
-      app: conductor-worker
-  template:
-    metadata:
-      labels:
-        app: conductor-worker
-    spec:
-      containers:
-      - name: conductor
-        image: myregistry/conductor:0.1.0
-        env:
-        - name: DATABASE_URL
-          valueFrom:
-            secretKeyRef:
-              name: conductor-secrets
-              key: database_url
-        - name: WORKER_ID
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.name
-        ports:
-        - containerPort: 8000
-          name: metrics
-        livenessProbe:
-          httpGet:
-            path: /health
-            port: 8000
-          initialDelaySeconds: 10
-          periodSeconds: 10
-        readinessProbe:
-          httpGet:
-            path: /health
-            port: 8000
-          initialDelaySeconds: 5
-          periodSeconds: 5
-        resources:
-          requests:
-            memory: "128Mi"
-            cpu: "250m"
-          limits:
-            memory: "512Mi"
-            cpu: "500m"
-```
-
-### Systemd Service
-
-```ini
-[Unit]
-Description=Conductor Worker
-After=network.target postgresql.service
-
-[Service]
-Type=simple
-User=conductor
-WorkingDirectory=/opt/conductor
-Environment="DATABASE_URL=postgresql://..."
-ExecStart=/usr/local/bin/python -m conductor.worker
-Restart=on-failure
-RestartSec=10s
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-```
+The worker serves Prometheus metrics at `/metrics` and a JSON health check at
+`/health` on `METRICS_PORT` (default 8000). A Grafana dashboard is provided
+in [docs/grafana/](docs/grafana/README.md).
 
 ---
 
@@ -896,24 +814,27 @@ WantedBy=multi-user.target
 
 ### TaskQueue
 
-#### `submit(task_type, payload, retry_policy=None, timeout=None)`
+#### `submit(task_type, payload, *, retry_policy=None, scheduled_for=None, route="default", priority=0, task_id=None)`
 
-Submit a new task.
+Submit a new task (async).
 
 **Parameters**:
-- `task_type` (str): Unique task identifier
+- `task_type` (str): Logical type used to route the task to a handler
 - `payload` (dict): Task data (JSON serializable)
-- `retry_policy` (dict, optional): Retry configuration
-- `timeout` (int, optional): Task execution timeout (seconds)
+- `retry_policy` (RetryPolicy, optional): Retry configuration
+- `scheduled_for` (datetime, optional): Earliest pickup time
+- `route` (str): Route for selective worker polling
+- `priority` (int): Higher runs first
+- `task_id` (str, optional): Explicit task ID
 
 **Returns**: `str` – Task ID
 
 **Example**:
 ```python
-task_id = queue.submit(
+task_id = await queue.submit(
     task_type="send_email",
     payload={"to": "user@example.com", "subject": "Hello"},
-    retry_policy={"max_retries": 3, "backoff": "exponential"}
+    retry_policy=RetryPolicy(max_retries=3, backoff_strategy="exponential"),
 )
 ```
 
@@ -1216,10 +1137,7 @@ worker = Worker(database_url=database_url)
    psql postgresql://user:password@localhost/conductor -c "SELECT 1"
    ```
 
-2. **Verify Conductor migrations are applied**:
-   ```bash
-   conductor migrate --database-url postgresql://user:password@localhost/conductor
-   ```
+2. **Schema is auto-managed** — tables are created on first `connect()`. Verify with `\dt` in psql.
 
 3. **Check database load**:
    ```sql

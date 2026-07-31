@@ -1,12 +1,15 @@
-# ──────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────
 # Conductor — Development Environment
-# ──────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────
 # Start with:
-#   docker compose up -d
+#   docker compose up -d --build
 #
 # Stop and clean up:
 #   docker compose down -v
-# ──────────────────────────────────────────────────────────
+#
+# The worker polls PostgreSQL, serves Prometheus metrics at :8000/metrics
+# and a JSON health check at :8000/health.
+# ─────────────────────────────────────────────────────────────────────────
 
 services:
   postgres:
@@ -27,6 +30,33 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+
+  worker:
+    build: .
+    image: conductor:0.1.0
+    container_name: conductor-worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://conductor:conductor@postgres:5432/conductor
+      CONCURRENCY: "10"
+      POLL_INTERVAL: "0.5"
+      LOG_LEVEL: INFO
+      LOG_FORMAT: json
+      METRICS_ENABLED: "true"
+      METRICS_PORT: "8000"
+      HEALTH_ENABLED: "true"
+      # CONDUCTOR_HANDLERS_MODULE: myapp.handlers   # optional: attach handlers
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
 volumes:
   pgdata:

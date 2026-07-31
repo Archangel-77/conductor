@@ -135,6 +135,21 @@ class TestRetryPolicy:
         p2 = RetryPolicy.from_dict(p.to_dict())
         assert p == p2
 
+    def test_string_backoff_strategy_coerced(self) -> None:
+        """A string strategy is normalized to the enum (documented API)."""
+        p = RetryPolicy(max_retries=3, backoff_strategy="exponential")
+        assert p.backoff_strategy == BackoffStrategyType.EXPONENTIAL
+        assert p.to_dict()["backoff_strategy"] == "exponential"
+
+    def test_invalid_backoff_strategy_raises(self) -> None:
+        with pytest.raises(RetryPolicyError, match="backoff_strategy"):
+            RetryPolicy(backoff_strategy="not-a-strategy")
+
+    def test_string_backoff_strategy_round_trips(self) -> None:
+        """Guards against the to_dict() crash for string strategies."""
+        p = RetryPolicy(max_retries=2, backoff_strategy="linear")
+        assert RetryPolicy.from_dict(p.to_dict()) == p
+
 
 # ===================================================================
 # Task

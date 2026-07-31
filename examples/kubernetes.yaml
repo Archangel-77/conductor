@@ -1,0 +1,116 @@
+# ─────────────────────────────────────────────────────────────────────────
+# Conductor — Kubernetes Example
+# ─────────────────────────────────────────────────────────────────────────
+# A worker Deployment with its ConfigMap, Secret, and a metrics/health
+# Service. PostgreSQL is assumed to be external/managed — set DATABASE_URL
+# in the Secret accordingly.
+#
+# Apply:
+#   kubectl apply -f examples/kubernetes.yaml
+#
+# For a real Secret, prefer an external secrets manager (e.g. SealedSecrets,
+# External Secrets Operator) or `kubectl create secret generic`.
+# ─────────────────────────────────────────────────────────────────────────
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: conductor-config
+  labels:
+    app: conductor-worker
+data:
+  CONCURRENCY: "10"
+  POLL_INTERVAL: "0.5"
+  LOG_LEVEL: "INFO"
+  LOG_FORMAT: "json"
+  METRICS_ENABLED: "true"
+  METRICS_PORT: "8000"
+  HEALTH_ENABLED: "true"
+  # CONDUCTOR_HANDLERS_MODULE: "myapp.handlers"
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: conductor-secrets
+  labels:
+    app: conductor-worker
+type: Opaque
+stringData:
+  # Base64 in real manifests; stringData keeps it readable here.
+  # Example: postgresql://conductor:<password>@<pg-host>:5432/conductor
+  DATABASE_URL: "postgresql://conductor:changeme@postgres.default.svc.cluster.local:5432/conductor"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: conductor-worker
+  labels:
+    app: conductor-worker
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: conductor-worker
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: conductor-worker
+    spec:
+      containers:
+        - name: worker
+          image: conductor:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: metrics
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: conductor-config
+            - secretRef:
+                name: conductor-secrets
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: conductor-worker
+  labels:
+    app: conductor-worker
+spec:
+  type: ClusterIP
+  selector:
+    app: conductor-worker
+  ports:
+    - name: metrics
+      port: 8000
+      targetPort: metrics

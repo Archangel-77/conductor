@@ -21,6 +21,11 @@ setup(
     license_files=("LICENSE",),
     packages=find_packages(exclude=["tests*", "examples*", "docs*"]),
     python_requires=">=3.11",
+    entry_points={
+        "console_scripts": [
+            "conductor = conductor.cli:main",
+        ],
+    },
     install_requires=[
         "asyncpg>=0.29.0",
         "aiohttp>=3.9.0",
@@ -30,6 +35,9 @@ setup(
     ],
     extras_require={
         "dev": [
+            "setuptools>=68.0.0",
+            "pyyaml>=6.0",
+            "types-PyYAML>=6.0.12",
             "pytest>=8.0.0",
             "pytest-asyncio>=0.23.0",
             "pytest-cov>=4.1.0",

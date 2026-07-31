@@ -148,7 +148,7 @@ async def db_pool() -> (  # noqa: N802  # pylint: disable=redefined-outer-name
     await pool.disconnect()
 
 
-@pytest_asyncio.fixture(scope="session")
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def schema_manager(  # noqa: N802  # pylint: disable=redefined-outer-name
     db_pool: DatabasePool,
 ) -> SchemaManager:

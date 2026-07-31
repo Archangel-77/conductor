@@ -527,7 +527,7 @@ class TaskQueue:
         """
         if not self._connected or self._pool.is_connected is False:
             raise TaskError(
-                "TaskQueue is not connected. Call connect() or use " "'async with TaskQueue(...)'."
+                "TaskQueue is not connected. Call connect() or use 'async with TaskQueue(...)'."
             )
         assert self._queries is not None  # guaranteed by _connected check
         return self._queries
@@ -541,7 +541,7 @@ class TaskQueue:
         """
         if not self._connected or self._pool.is_connected is False:
             raise TaskError(
-                "TaskQueue is not connected. Call connect() or use " "'async with TaskQueue(...)'."
+                "TaskQueue is not connected. Call connect() or use 'async with TaskQueue(...)'."
             )
 
     # ------------------------------------------------------------------
@@ -570,7 +570,7 @@ class TaskQueue:
         queries = self._queries
         if queries is None:
             raise TaskError(
-                "TaskQueue is not connected. Call connect() or use " "'async with TaskQueue(...)'."
+                "TaskQueue is not connected. Call connect() or use 'async with TaskQueue(...)'."
             )
         return queries
 

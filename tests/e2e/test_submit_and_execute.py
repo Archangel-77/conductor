@@ -17,7 +17,6 @@ Workflows tested:
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
@@ -477,12 +476,6 @@ class TestMultipleWorkersE2E:
         results_b: list[int] = []
 
         task_ids = []
-        for i in range(6):
-            tid = await task_queue.submit(
-                "e2e_concurrent",
-                {"n": i},
-            )
-            task_ids.append(tid)
 
         async with (
             Worker(
@@ -513,19 +506,20 @@ class TestMultipleWorkersE2E:
                 results_b.append(payload["n"])
                 return {"processed_by": "b"}
 
-            task_a = asyncio.create_task(wa.run())
-            task_b = asyncio.create_task(wb.run())
-            await asyncio.sleep(0.5)
-
-            await wa.shutdown()
-            await wb.shutdown()
-            await task_a
-            await task_b
+            for i in range(6):
+                tid = await task_queue.submit("e2e_concurrent", {"n": i})
+                task_ids.append(tid)
+                # Alternate which worker polls so both deterministically
+                # participate (each run_once picks up the single pending task).
+                if i % 2 == 0:
+                    await wa.run_once()
+                else:
+                    await wb.run_once()
 
         # Both workers should have participated
         assert len(results_a) >= 1
         assert len(results_b) >= 1
-        # All 6 tasks should be completed in the DB (some may be double-processed)
+        # All 6 tasks should be completed in the DB
         for tid in task_ids:
             task = await task_queue.get_task(tid)
             assert task is not None

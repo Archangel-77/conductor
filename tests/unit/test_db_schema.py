@@ -53,7 +53,7 @@ class TestTableCreation:
         ]
         for table in tables:
             row = await db_pool.fetchrow(
-                "SELECT tablename FROM pg_catalog.pg_tables " "WHERE tablename = $1",
+                "SELECT tablename FROM pg_catalog.pg_tables WHERE tablename = $1",
                 table,
             )
             assert row is not None, f"Table '{table}' not found"
@@ -99,7 +99,7 @@ class TestConstraints:
     async def test_valid_task_insert(self, db_pool: Any) -> None:
         """A valid task insert should succeed."""
         result = await db_pool.execute(
-            "INSERT INTO conductor_tasks " "(task_id, task_type, payload) " "VALUES ($1, $2, '{}')",
+            "INSERT INTO conductor_tasks (task_id, task_type, payload) VALUES ($1, $2, '{}')",
             "valid-task-1",
             "test",
         )
@@ -170,7 +170,7 @@ class TestRollback:
 
         # Tables should be gone
         row = await db_pool.fetchrow(
-            "SELECT tablename FROM pg_catalog.pg_tables " "WHERE tablename LIKE 'conductor_%'"
+            "SELECT tablename FROM pg_catalog.pg_tables WHERE tablename LIKE 'conductor_%'"
         )
         assert row is None
 

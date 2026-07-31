@@ -1,0 +1,105 @@
+# ─────────────────────────────────────────────────────────────────────────
+# Conductor — Production Example
+# ─────────────────────────────────────────────────────────────────────────
+# Run (3 worker replicas):
+#   export POSTGRES_PASSWORD='<strong-password>'
+#   docker compose -f docker-compose.prod.yml up -d --build --scale worker=3
+#
+# Notes:
+#   - Worker replicas share the PostgreSQL queue; FOR UPDATE SKIP LOCKED
+#     keeps polling atomic across workers.
+#   - `deploy.replicas` is honoured under Docker Swarm; under plain Compose
+#     use `--scale worker=N` as above.
+#   - Logs use the json-file driver with rotation. Metrics/health on :8000.
+# ─────────────────────────────────────────────────────────────────────────
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: conductor-pg-prod
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: conductor
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: conductor
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - pgbackups:/backups
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U conductor -d conductor"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  worker:
+    build: .
+    image: conductor:0.1.0
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://conductor:${POSTGRES_PASSWORD}@postgres:5432/conductor
+      CONCURRENCY: "10"
+      POLL_INTERVAL: "0.5"
+      LOG_LEVEL: INFO
+      LOG_FORMAT: json
+      METRICS_ENABLED: "true"
+      METRICS_PORT: "8000"
+      HEALTH_ENABLED: "true"
+      # CONDUCTOR_HANDLERS_MODULE: myapp.handlers
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      replicas: 3
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Nightly pg_dump into the shared pgbackups volume.
+  pg_backup:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - pgbackups:/backups
+    entrypoint: >
+      /bin/sh -c 'while true; do
+      PGPASSWORD="$${PGPASSWORD}" pg_dump -h postgres -U conductor conductor
+      | gzip > /backups/conductor-$$(date +%Y%m%d-%H%M%S).sql.gz;
+      echo "backup written"; sleep 86400; done'
+
+volumes:
+  pgdata:
+  pgbackups:

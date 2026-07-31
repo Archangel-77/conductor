@@ -13,9 +13,31 @@ from typing import Any
 import pytest
 
 from conductor.db.connection import DatabasePool, PoolConfig
-from conductor.exceptions import ConductorConnectionError
+from conductor.exceptions import ConductorConnectionError, DatabaseError
 
 pytestmark = pytest.mark.integration
+
+
+async def _new_pool() -> DatabasePool:
+    """Create a private connected pool against the test database.
+
+    Kept separate from the shared ``db_pool`` fixture so tests that
+    disconnect a pool do not corrupt the session-scoped fixture.
+    """
+    from tests.conftest import TEST_DATABASE_URL
+
+    pool = DatabasePool(
+        dsn=TEST_DATABASE_URL,
+        min_size=1,
+        max_size=2,
+        timeout=5.0,
+        max_retries=1,
+    )
+    try:
+        await pool.connect()
+    except ConductorConnectionError as exc:
+        pytest.skip(f"Could not connect to test database: {exc}")
+    return pool
 
 
 # ===================================================================
@@ -66,17 +88,22 @@ class TestDatabasePoolConnect:
         assert pool.is_connected is False
         assert await pool.health_check() is False
 
-    async def test_double_disconnect_safe(self, db_pool: Any) -> None:
-        """Disconnecting twice should not raise."""
-        await db_pool.disconnect()
-        await db_pool.disconnect()  # second call is a no-op
-        assert db_pool.is_connected is False
+    async def test_double_disconnect_safe(self) -> None:
+        """Disconnecting twice should not raise.
 
-    async def test_acquire_after_disconnect_raises(self, db_pool: Any) -> None:
+        Uses a private pool so the shared session fixture is left intact.
+        """
+        pool = await _new_pool()
+        await pool.disconnect()
+        await pool.disconnect()  # second call is a no-op
+        assert pool.is_connected is False
+
+    async def test_acquire_after_disconnect_raises(self) -> None:
         """Acquiring a connection after disconnect should raise."""
-        await db_pool.disconnect()
-        with pytest.raises(Exception):
-            async with db_pool.acquire():
+        pool = await _new_pool()
+        await pool.disconnect()
+        with pytest.raises(DatabaseError):
+            async with pool.acquire():
                 pass  # pragma: no cover
 
     async def test_connect_fails_with_bad_uri(self) -> None:
@@ -126,7 +153,6 @@ class TestConcurrentConnections:
 
     async def test_ten_concurrent_queries(self) -> None:
         """The pool should handle 10+ concurrent connections."""
-        from conductor.exceptions import ConductorConnectionError
         from tests.conftest import TEST_DATABASE_URL
 
         pool = DatabasePool(

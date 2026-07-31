@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+  schedule:
+    # Weekly performance run (Monday 02:00 UTC)
+    - cron: "0 2 * * 1"
+
+jobs:
+  lint:
+    name: Lint (black, flake8, mypy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install package with dev extras
+        run: pip install -e ".[dev]"
+
+      - name: Formatting (black)
+        run: black --check conductor/ tests/ scripts/ examples/
+
+      - name: Lint (flake8)
+        run: flake8 conductor/ tests/ scripts/ examples/
+
+      - name: Type check (mypy --strict)
+        run: mypy conductor/
+
+      - name: Validate deployment artifacts
+        run: python scripts/validate_deploy.py
+
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.14"]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: conductor
+          POSTGRES_PASSWORD: conductor
+          POSTGRES_DB: conductor_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U conductor"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      CONDUCTOR_TEST_DATABASE_URL: postgresql://conductor:conductor@localhost:5432/conductor_test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install package with dev extras
+        run: pip install -e ".[dev]"
+
+      - name: Run tests (unit, integration, e2e)
+        run: pytest tests/unit tests/integration tests/e2e -m "not perf" --cov-report=xml --cov-report=term-missing
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.xml
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  perf:
+    name: Performance benchmarks
+    runs-on: ubuntu-latest
+    # Manual or scheduled runs only; thresholds are relaxed for CI machines.
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: conductor
+          POSTGRES_PASSWORD: conductor
+          POSTGRES_DB: conductor_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U conductor"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      CONDUCTOR_TEST_DATABASE_URL: postgresql://conductor:conductor@localhost:5432/conductor_test
+      # Relaxed thresholds for shared CI runners (see tests/perf/test_benchmarks.py)
+      PERF_MAX_SUBMIT_MS: "5"
+      PERF_MAX_EXEC_MS: "20"
+      PERF_MAX_POLL_MS: "500"
+      PERF_MIN_THROUGHPUT: "200"
+      PERF_MAX_MEMORY_MB: "80"
+      PERF_SAMPLES_SUBMIT: "200"
+      PERF_SAMPLES_EXEC: "50"
+      PERF_SAMPLES_POLL: "10"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install package with dev extras
+        run: pip install -e ".[dev]"
+
+      - name: Run benchmarks
+        run: pytest tests/perf -m perf --no-cov -v

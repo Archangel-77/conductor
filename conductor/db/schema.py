@@ -186,7 +186,7 @@ ROLLBACK_SQL = [
     "DROP TABLE IF EXISTS conductor_retries CASCADE;",
     "DROP TABLE IF EXISTS conductor_workers CASCADE;",
     "DROP TABLE IF EXISTS conductor_tasks CASCADE;",
-    "DELETE FROM conductor_version WHERE version = 1;",
+    "DROP TABLE IF EXISTS conductor_version CASCADE;",
 ]
 
 # ---------------------------------------------------------------------------

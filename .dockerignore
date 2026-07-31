@@ -1,0 +1,27 @@
+# VCS / IDE
+.git
+.gitignore
+.github
+.vscode
+
+# Python
+.venv
+venv
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache
+.mypy_cache
+.coverage
+htmlcov
+
+# Docs / examples / tests are excluded from the wheel, so keep them out of the
+# Docker build context too.
+docs
+examples
+tests
+
+# Misc
+plan.pdf
+*.log
+.env

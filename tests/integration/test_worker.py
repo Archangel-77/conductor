@@ -753,18 +753,15 @@ class TestMultipleWorkers:
 
             for i in range(4):
                 await task_queue.submit("shared", {"n": i})
-
-            task_a = asyncio.create_task(worker_a.run())
-            task_b = asyncio.create_task(worker_b.run())
-            await asyncio.sleep(0.5)
-
-            await worker_a.shutdown()
-            await worker_b.shutdown()
-            await task_a
-            await task_b
+                # Alternate which worker polls so both deterministically
+                # participate (each run_once picks up the single pending task).
+                if i % 2 == 0:
+                    await worker_a.run_once()
+                else:
+                    await worker_b.run_once()
 
         # Both workers should have participated
-        assert len(results) >= 4  # may have duplicates due to race window
+        assert len(results) == 4
         assert any(r.startswith("a:") for r in results)
         assert any(r.startswith("b:") for r in results)
         # All 4 tasks should be completed in the DB

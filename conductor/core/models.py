@@ -14,7 +14,7 @@ import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Optional, cast
+from typing import Any, Optional, Union, cast
 
 from conductor.exceptions import RetryPolicyError, TaskError
 
@@ -70,14 +70,39 @@ class RetryPolicy:
     max_retries: int = 3
     """Maximum number of retry attempts (default 3)."""
 
-    backoff_strategy: BackoffStrategyType = BackoffStrategyType.EXPONENTIAL
-    """Backoff algorithm to use between retries."""
+    backoff_strategy: Union[str, BackoffStrategyType] = BackoffStrategyType.EXPONENTIAL
+    """Backoff algorithm to use between retries.
+
+    Accepts a ``BackoffStrategyType`` or its string value (e.g.
+    ``"exponential"``). Normalized to the enum in ``__post_init__``.
+    """
 
     initial_delay: float = 1.0
     """Delay before the first retry, in seconds."""
 
     max_delay: float = 3600.0
     """Maximum delay between retries, in seconds (capped)."""
+
+    def __post_init__(self) -> None:
+        """Normalize ``backoff_strategy`` to a ``BackoffStrategyType``.
+
+        Accepts either the enum or its string value (e.g. ``"exponential"``),
+        so the documented ``RetryPolicy(backoff_strategy="exponential")`` form
+        works end-to-end.
+
+        Raises:
+            RetryPolicyError: If ``backoff_strategy`` is not a known strategy.
+        """
+        strategy = self.backoff_strategy
+        if not isinstance(strategy, BackoffStrategyType):
+            try:
+                strategy = BackoffStrategyType(str(strategy))
+            except ValueError as exc:
+                raise RetryPolicyError(
+                    f"Invalid backoff_strategy '{strategy}'. "
+                    "Expected one of: exponential, linear, fixed."
+                ) from exc
+            object.__setattr__(self, "backoff_strategy", strategy)
 
     def validate(self) -> None:
         """Validate policy values.
@@ -96,7 +121,8 @@ class RetryPolicy:
         """Serialize to a JSON-friendly dictionary."""
         return {
             "max_retries": self.max_retries,
-            "backoff_strategy": self.backoff_strategy.value,
+            # ``__post_init__`` guarantees this is a ``BackoffStrategyType``.
+            "backoff_strategy": cast(BackoffStrategyType, self.backoff_strategy).value,
             "initial_delay": self.initial_delay,
             "max_delay": self.max_delay,
         }

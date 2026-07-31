@@ -1,0 +1,37 @@
+# ─────────────────────────────────────────────────────────────────────────
+# Conductor Worker — systemd unit example
+# ─────────────────────────────────────────────────────────────────────────
+# Install:
+#   sudo cp examples/conductor-worker.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now conductor-worker
+#
+# Configuration is read from the .env file listed below (or from the
+# process environment if EnvironmentFile is removed).
+# ─────────────────────────────────────────────────────────────────────────
+
+[Unit]
+Description=Conductor Worker
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=conductor
+Group=conductor
+WorkingDirectory=/opt/conductor
+EnvironmentFile=/opt/conductor/.env
+ExecStart=/usr/local/bin/conductor worker
+Restart=on-failure
+RestartSec=10s
+KillSignal=SIGTERM
+TimeoutStopSec=45
+StandardOutput=journal
+StandardError=journal
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
