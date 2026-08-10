@@ -45,6 +45,14 @@ def _env_int(name: str, default: int) -> int:
     return int(raw)
 
 
+def _env_opt_int(name: str) -> Optional[int]:
+    """Parse an optional integer environment variable (``None`` if unset)."""
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return None
+    return int(raw)
+
+
 def _env_float(name: str, default: float) -> float:
     """Parse a float environment variable."""
     raw = os.getenv(name)
@@ -86,6 +94,14 @@ class WorkerSettings:
         metrics_port: Metrics/health HTTP server port.
         metrics_enabled: Toggle the Prometheus metrics endpoint.
         health_enabled: Toggle the health check endpoint.
+        enable_scheduler: Also run the recurring-task scheduler in-process.
+        grpc_port: Port for the optional gRPC server.
+        grpc_enabled: Serve the ``ConductorWorker`` gRPC API.
+        grpc_max_message_size: Optional max gRPC message size in bytes.
+        api_port: Port for the optional web dashboard server.
+        api_enabled: Serve the web dashboard (FastAPI + built frontend).
+        api_key: Optional API key required by the dashboard ``/api/*``
+            endpoints (``X-API-Key`` header).
         handlers_module: Optional dotted path to a module exposing a
             ``register(worker)`` function that attaches task handlers.
     """
@@ -105,6 +121,13 @@ class WorkerSettings:
     metrics_port: int = 8000
     metrics_enabled: bool = True
     health_enabled: bool = True
+    enable_scheduler: bool = False
+    grpc_port: int = 50051
+    grpc_enabled: bool = False
+    grpc_max_message_size: Optional[int] = None
+    api_port: int = 8080
+    api_enabled: bool = False
+    api_key: Optional[str] = None
     handlers_module: Optional[str] = None
 
     @classmethod
@@ -136,6 +159,13 @@ class WorkerSettings:
             metrics_port=_env_int("METRICS_PORT", 8000),
             metrics_enabled=_env_bool("METRICS_ENABLED", True),
             health_enabled=_env_bool("HEALTH_ENABLED", True),
+            enable_scheduler=_env_bool("CONDUCTOR_ENABLE_SCHEDULER", False),
+            grpc_port=_env_int("GRPC_PORT", 50051),
+            grpc_enabled=_env_bool("GRPC_ENABLED", False),
+            grpc_max_message_size=_env_opt_int("GRPC_MAX_MESSAGE_SIZE"),
+            api_port=_env_int("CONDUCTOR_API_PORT", 8080),
+            api_enabled=_env_bool("CONDUCTOR_API_ENABLED", False),
+            api_key=os.getenv("CONDUCTOR_API_KEY") or None,
             handlers_module=os.getenv("CONDUCTOR_HANDLERS_MODULE") or None,
         )
 
@@ -157,6 +187,13 @@ class WorkerSettings:
             metrics_port=self.metrics_port,
             metrics_enabled=self.metrics_enabled,
             health_enabled=self.health_enabled,
+            enable_scheduler=self.enable_scheduler,
+            grpc_port=self.grpc_port,
+            grpc_enabled=self.grpc_enabled,
+            grpc_max_message_size=self.grpc_max_message_size,
+            api_port=self.api_port,
+            api_enabled=self.api_enabled,
+            api_key=self.api_key,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -177,5 +214,12 @@ class WorkerSettings:
             "metrics_port": self.metrics_port,
             "metrics_enabled": self.metrics_enabled,
             "health_enabled": self.health_enabled,
+            "enable_scheduler": self.enable_scheduler,
+            "grpc_port": self.grpc_port,
+            "grpc_enabled": self.grpc_enabled,
+            "grpc_max_message_size": self.grpc_max_message_size,
+            "api_port": self.api_port,
+            "api_enabled": self.api_enabled,
+            "api_key": self.api_key,
             "handlers_module": self.handlers_module,
         }

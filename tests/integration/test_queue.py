@@ -72,6 +72,7 @@ async def _cleanup(queue: Any) -> Any:
         await queue.execute_raw("DELETE FROM conductor_dead_letter")
         await queue.execute_raw("DELETE FROM conductor_tasks")
         await queue.execute_raw("DELETE FROM conductor_workers")
+        await queue.execute_raw("DELETE FROM conductor_recurring_tasks")
 
 
 # ===================================================================
@@ -109,6 +110,42 @@ class TestTaskQueueIntegration:
         assert "test-type-1" in types
         assert "test-type-2" in types
 
+    async def test_list_pending_orders_by_priority(self, queue: Any) -> None:
+        """Pending tasks should be listed highest priority first."""
+        await queue.submit("prio_low", {"n": 0}, priority=-10)
+        await queue.submit("prio_high", {"n": 2}, priority=50)
+        await queue.submit("prio_mid", {"n": 1}, priority=0)
+
+        pending = await queue.list_pending_tasks()
+        high = next(t for t in pending if t.task_type == "prio_high")
+        mid = next(t for t in pending if t.task_type == "prio_mid")
+        low = next(t for t in pending if t.task_type == "prio_low")
+        assert high.priority >= mid.priority >= low.priority
+
+        idx = {t.task_type: i for i, t in enumerate(pending)}
+        assert idx["prio_high"] < idx["prio_mid"] < idx["prio_low"]
+
+    async def test_list_pending_filters_by_route(self, queue: Any) -> None:
+        """list_pending_tasks with a route should only return that route."""
+        await queue.submit("route_a_task", {}, route="alpha")
+        await queue.submit("route_b_task", {}, route="beta")
+
+        pending = await queue.list_pending_tasks(route="alpha")
+        assert all(t.route == "alpha" for t in pending)
+        types = {t.task_type for t in pending}
+        assert "route_a_task" in types
+        assert "route_b_task" not in types
+
+    async def test_submit_invalid_priority_raises(self, queue: Any) -> None:
+        """Out-of-range priority should raise ValueError up-front."""
+        with pytest.raises(ValueError, match="priority"):
+            await queue.submit("bad_prio", {}, priority=200)
+
+    async def test_submit_invalid_route_raises(self, queue: Any) -> None:
+        """Empty route should raise ValueError up-front."""
+        with pytest.raises(ValueError, match="route"):
+            await queue.submit("bad_route", {}, route="")
+
     async def test_submit_many(self, queue: Any) -> None:
         """submit_many should insert all tasks and return their IDs."""
         tasks = [
@@ -124,6 +161,20 @@ class TestTaskQueueIntegration:
         for tid in ids:
             task = await queue.get_task(tid)
             assert task is not None
+
+    async def test_submit_many_with_scheduled_for(self, queue: Any) -> None:
+        """A shared scheduled_for should be persisted for every task."""
+        future = datetime(2099, 1, 1, tzinfo=timezone.utc)  # noqa: UP017
+        ids = await queue.submit_many(
+            [("sched-a", {}), ("sched-b", {})],
+            scheduled_for=future,
+        )
+
+        for tid in ids:
+            task = await queue.get_task(tid)
+            assert task is not None
+            assert task.scheduled_for is not None
+            assert task.scheduled_for.year == 2099
 
     async def test_task_status_transition(self, queue: Any) -> None:
         """Update task status and verify."""
@@ -271,3 +322,47 @@ class TestTaskQueueIntegration:
             tid = await queue.submit(f"unique_{i}", {"i": i})
             ids.add(tid)
         assert len(ids) == 20
+
+
+class TestCancelTask:
+
+    async def test_cancel_pending_task(self, queue: Any) -> None:
+        """A pending task becomes ``cancelled`` with a completion stamp."""
+        task_id = await queue.submit("cancel.pending", {})
+        await queue.cancel_task(task_id)
+
+        task = await queue.get_task(task_id)
+        assert task is not None
+        assert task.status == TaskStatus.CANCELLED
+        assert task.completed_at is not None
+
+    async def test_cancel_retrying_task(self, queue: Any) -> None:
+        """A retrying task can also be cancelled."""
+        task_id = await queue.submit("cancel.retrying", {})
+        await queue._query.update_task_status(task_id, "retrying")
+        await queue.cancel_task(task_id)
+
+        task = await queue.get_task(task_id)
+        assert task is not None
+        assert task.status == TaskStatus.CANCELLED
+
+    async def test_cancel_completed_task_raises(self, queue: Any) -> None:
+        """A completed task cannot be cancelled."""
+        task_id = await queue.submit("cancel.completed", {})
+        await queue._query.update_task_status(task_id, "completed")
+
+        with pytest.raises(TaskError, match="cannot be cancelled"):
+            await queue.cancel_task(task_id)
+
+    async def test_cancel_processing_task_raises(self, queue: Any) -> None:
+        """A processing task cannot be cancelled."""
+        task_id = await queue.submit("cancel.processing", {})
+        await queue._query.update_task_status(task_id, "processing")
+
+        with pytest.raises(TaskError, match="cannot be cancelled"):
+            await queue.cancel_task(task_id)
+
+    async def test_cancel_missing_task_raises(self, queue: Any) -> None:
+        """Cancelling a non-existent task raises TaskError."""
+        with pytest.raises(TaskError, match="not found"):
+            await queue.cancel_task("no-such-task-id")

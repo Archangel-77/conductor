@@ -64,6 +64,12 @@ def mock_queries() -> MagicMock:
     q.select_pending_tasks = AsyncMock()
     q.select_tasks_by_status = AsyncMock()
     q.count_tasks_by_status = AsyncMock()
+    q.cancel_task = AsyncMock()
+    q.insert_recurring_task = AsyncMock()
+    q.select_recurring_task = AsyncMock()
+    q.select_recurring_tasks = AsyncMock()
+    q.set_recurring_enabled = AsyncMock()
+    q.delete_recurring_task = AsyncMock()
     return q
 
 
@@ -225,6 +231,46 @@ class TestSubmit:
         assert call_kwargs["priority"] == 50
 
     @pytest.mark.asyncio
+    async def test_submit_priority_above_max(self, queue: Any) -> None:
+        """Priority above 100 should raise ValueError up-front."""
+        with pytest.raises(ValueError, match="priority"):
+            await queue.submit("test", {}, priority=101)
+
+    @pytest.mark.asyncio
+    async def test_submit_priority_below_min(self, queue: Any) -> None:
+        """Priority below -100 should raise ValueError up-front."""
+        with pytest.raises(ValueError, match="priority"):
+            await queue.submit("test", {}, priority=-101)
+
+    @pytest.mark.asyncio
+    async def test_submit_priority_boundaries(self, queue: Any, mock_queries: Any) -> None:
+        """Priority boundaries (-100 and 100) should be accepted."""
+        mock_queries.insert_task.return_value = "tid"
+
+        await queue.submit("test", {}, priority=-100)
+        await queue.submit("test", {}, priority=100)
+
+        assert mock_queries.insert_task.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_submit_priority_not_int(self, queue: Any) -> None:
+        """Non-integer priority should raise ValueError."""
+        with pytest.raises(ValueError, match="priority"):
+            await queue.submit("test", {}, priority="high")
+
+    @pytest.mark.asyncio
+    async def test_submit_empty_route(self, queue: Any) -> None:
+        """Empty route should raise ValueError."""
+        with pytest.raises(ValueError, match="route"):
+            await queue.submit("test", {}, route="")
+
+    @pytest.mark.asyncio
+    async def test_submit_non_string_route(self, queue: Any) -> None:
+        """Non-string route should raise ValueError."""
+        with pytest.raises(ValueError, match="route"):
+            await queue.submit("test", {}, route=123)
+
+    @pytest.mark.asyncio
     async def test_submit_when_not_connected(self) -> None:
         """Submitting without connection should raise TaskError."""
         q = TaskQueue(database_url="pg://localhost/db")
@@ -258,6 +304,35 @@ class TestSubmitMany:
     async def test_submit_many_empty_type(self, queue: Any) -> None:
         with pytest.raises(ValueError, match="task_type"):
             await queue.submit_many([("", {})])
+
+    @pytest.mark.asyncio
+    async def test_submit_many_invalid_priority(self, queue: Any) -> None:
+        """Out-of-range priority should raise ValueError up-front."""
+        with pytest.raises(ValueError, match="priority"):
+            await queue.submit_many([("a", {})], priority=200)
+
+    @pytest.mark.asyncio
+    async def test_submit_many_empty_route(self, queue: Any) -> None:
+        """Empty route should raise ValueError up-front."""
+        with pytest.raises(ValueError, match="route"):
+            await queue.submit_many([("a", {})], route="")
+
+    @pytest.mark.asyncio
+    async def test_submit_many_with_scheduled_for(self, queue: Any, mock_queries: Any) -> None:
+        """A shared scheduled_for should be applied to every task."""
+        mock_queries.insert_task.side_effect = ["id-1", "id-2"]
+        sched = datetime(2026, 12, 1, 9, 0, 0, tzinfo=timezone.utc)
+
+        await queue.submit_many(
+            [("a", {}), ("b", {})],
+            scheduled_for=sched,
+        )
+
+        assert mock_queries.insert_task.await_count == 2
+        first = mock_queries.insert_task.call_args_list[0][0][0]
+        second = mock_queries.insert_task.call_args_list[1][0][0]
+        assert first["scheduled_for"] == sched
+        assert second["scheduled_for"] == sched
 
 
 # ===================================================================
@@ -362,7 +437,27 @@ class TestListPendingTasks:
         mock_queries.select_pending_tasks.assert_awaited_with(
             limit=5,
             offset=0,
+            route=None,
         )
+
+    @pytest.mark.asyncio
+    async def test_list_pending_with_route(self, queue: Any, mock_queries: Any) -> None:
+        """list_pending_tasks should forward a route filter to the query."""
+        mock_queries.select_pending_tasks.return_value = []
+
+        await queue.list_pending_tasks(route="critical")
+
+        mock_queries.select_pending_tasks.assert_awaited_with(
+            limit=10,
+            offset=0,
+            route="critical",
+        )
+
+    @pytest.mark.asyncio
+    async def test_list_pending_invalid_route(self, queue: Any) -> None:
+        """An empty route should raise ValueError."""
+        with pytest.raises(ValueError, match="route"):
+            await queue.list_pending_tasks(route="")
 
     @pytest.mark.asyncio
     async def test_list_pending_empty(self, queue: Any, mock_queries: Any) -> None:
@@ -455,6 +550,133 @@ class TestCountTasksByStatus:
 
 
 # ===================================================================
+# schedule_recurring()
+# ===================================================================
+
+
+class TestScheduleRecurring:
+
+    @pytest.mark.asyncio
+    async def test_schedule_recurring(self, queue: Any, mock_queries: Any) -> None:
+        """schedule_recurring should insert a definition and return its ID."""
+        mock_queries.insert_recurring_task.side_effect = lambda d: d["id"]
+
+        rid = await queue.schedule_recurring(
+            "cleanup",
+            {"keep": 30},
+            "0 2 * * *",
+            route="batch",
+            priority=5,
+        )
+
+        assert rid
+        call_dict = mock_queries.insert_recurring_task.call_args[0][0]
+        assert call_dict["id"] == rid
+        assert call_dict["task_type"] == "cleanup"
+        assert call_dict["payload"] == {"keep": 30}
+        assert call_dict["cron_expression"] == "0 2 * * *"
+        assert call_dict["route"] == "batch"
+        assert call_dict["priority"] == 5
+        assert call_dict["enabled"] is True
+        # next_run_at is a native datetime and in the future
+        assert call_dict["next_run_at"].tzinfo is not None
+        assert call_dict["next_run_at"] > datetime.now(timezone.utc)
+
+    @pytest.mark.asyncio
+    async def test_schedule_recurring_custom_id(self, queue: Any, mock_queries: Any) -> None:
+        """An explicit recurring_id should be honored."""
+        mock_queries.insert_recurring_task.return_value = "my-rec"
+
+        rid = await queue.schedule_recurring(
+            "cleanup",
+            {},
+            "*/5 * * * *",
+            recurring_id="my-rec",
+        )
+
+        assert rid == "my-rec"
+        assert mock_queries.insert_recurring_task.call_args[0][0]["id"] == "my-rec"
+
+    @pytest.mark.asyncio
+    async def test_schedule_recurring_invalid_cron(self, queue: Any) -> None:
+        """An invalid cron expression should raise ValueError up-front."""
+        with pytest.raises(ValueError, match="cron"):
+            await queue.schedule_recurring("cleanup", {}, "not a cron")
+
+    @pytest.mark.asyncio
+    async def test_schedule_recurring_invalid_priority(self, queue: Any) -> None:
+        """Out-of-range priority should raise ValueError."""
+        with pytest.raises(ValueError, match="priority"):
+            await queue.schedule_recurring("cleanup", {}, "0 2 * * *", priority=500)
+
+    @pytest.mark.asyncio
+    async def test_list_recurring_tasks(self, queue: Any, mock_queries: Any) -> None:
+        """list_recurring_tasks should return RecurringTask objects."""
+        from conductor.core.models import RecurringTask
+
+        mock_queries.select_recurring_tasks.return_value = [
+            {
+                "id": "rec-1",
+                "task_type": "cleanup",
+                "payload": {},
+                "cron_expression": "0 2 * * *",
+                "route": "default",
+                "priority": 0,
+                "retry_policy": {},
+                "enabled": True,
+                "next_run_at": datetime.now(timezone.utc),
+                "last_run_at": None,
+                "created_at": datetime.now(timezone.utc),
+            }
+        ]
+
+        tasks = await queue.list_recurring_tasks()
+        assert len(tasks) == 1
+        assert isinstance(tasks[0], RecurringTask)
+        assert tasks[0].id == "rec-1"
+        mock_queries.select_recurring_tasks.assert_awaited_with(limit=10, offset=0)
+
+    @pytest.mark.asyncio
+    async def test_get_recurring_task(self, queue: Any, mock_queries: Any) -> None:
+        """get_recurring_task returns a RecurringTask or None."""
+        mock_queries.select_recurring_task.return_value = None
+        assert await queue.get_recurring_task("missing") is None
+
+    @pytest.mark.asyncio
+    async def test_pause_and_resume(self, queue: Any, mock_queries: Any) -> None:
+        """pause_recurring/resume_recurring toggle the enabled flag."""
+        mock_queries.set_recurring_enabled.return_value = True
+
+        await queue.pause_recurring("rec-1")
+        mock_queries.set_recurring_enabled.assert_awaited_with("rec-1", False)
+
+        await queue.resume_recurring("rec-1")
+        mock_queries.set_recurring_enabled.assert_awaited_with("rec-1", True)
+
+    @pytest.mark.asyncio
+    async def test_pause_missing_raises(self, queue: Any, mock_queries: Any) -> None:
+        """Pausing a nonexistent definition should raise TaskError."""
+        mock_queries.set_recurring_enabled.return_value = False
+        with pytest.raises(TaskError, match="not found"):
+            await queue.pause_recurring("missing")
+
+    @pytest.mark.asyncio
+    async def test_delete_recurring_task(self, queue: Any, mock_queries: Any) -> None:
+        """delete_recurring_task removes the definition."""
+        mock_queries.delete_recurring_task.return_value = True
+
+        await queue.delete_recurring_task("rec-1")
+        mock_queries.delete_recurring_task.assert_awaited_with("rec-1")
+
+    @pytest.mark.asyncio
+    async def test_delete_missing_raises(self, queue: Any, mock_queries: Any) -> None:
+        """Deleting a nonexistent definition should raise TaskError."""
+        mock_queries.delete_recurring_task.return_value = False
+        with pytest.raises(TaskError, match="not found"):
+            await queue.delete_recurring_task("missing")
+
+
+# ===================================================================
 # _task_to_db_dict helper
 # ===================================================================
 
@@ -502,3 +724,39 @@ class TestTaskToDbDict:
         assert restored.route == original.route
         assert restored.retry_policy == original.retry_policy
         assert restored.scheduled_for == original.scheduled_for
+
+
+# ===================================================================
+# Cancelling tasks
+# ===================================================================
+
+
+class TestCancelTask:
+
+    async def test_cancel_pending_task(self, queue: Any, mock_queries: Any) -> None:
+        """Cancelling a pending task delegates to the cancel query."""
+        mock_queries.cancel_task.return_value = True
+        await queue.cancel_task("task-1")
+        mock_queries.cancel_task.assert_awaited_once_with("task-1")
+        mock_queries.select_task.assert_not_awaited()
+
+    async def test_cancel_missing_task_raises(self, queue: Any, mock_queries: Any) -> None:
+        """Cancelling a non-existent task raises TaskError."""
+        mock_queries.cancel_task.return_value = False
+        mock_queries.select_task.return_value = None
+        with pytest.raises(TaskError, match="not found"):
+            await queue.cancel_task("missing")
+        mock_queries.select_task.assert_awaited_once_with("missing")
+
+    async def test_cancel_not_cancellable_raises(self, queue: Any, mock_queries: Any) -> None:
+        """Cancelling a completed task raises TaskError."""
+        mock_queries.cancel_task.return_value = False
+        mock_queries.select_task.return_value = {
+            "task_id": "task-1",
+            "status": "completed",
+        }
+        with pytest.raises(
+            TaskError,
+            match="cannot be cancelled from status 'completed'",
+        ):
+            await queue.cancel_task("task-1")

@@ -33,6 +33,10 @@ setup(
         "pydantic>=2.0.0",
         "prometheus-client>=0.19.0",
         "python-dotenv>=1.0.0",
+        "croniter>=1.4",
+        "grpcio>=1.60",
+        "fastapi>=0.110",
+        "uvicorn>=0.29",
     ],
     extras_require={
         "dev": [
@@ -40,6 +44,11 @@ setup(
             "build>=1.0.0",
             "pyyaml>=6.0",
             "types-PyYAML>=6.0.12",
+            "types-croniter>=6.2.4",
+            "types-protobuf>=5.28",
+            "grpcio-tools>=1.60",
+            "grpc-stubs>=1.53",
+            "httpx>=0.27",
             "pytest>=8.0.0",
             "pytest-asyncio>=0.23.0",
             "pytest-cov>=4.1.0",

@@ -32,8 +32,8 @@ Submit a new task.
 - `payload` (`dict`): arbitrary JSON-serialisable data.
 - `retry_policy` (`RetryPolicy | None`): retry configuration.
 - `scheduled_for` (`datetime | None`): earliest pickup time.
-- `route` (`str`): route name for selective worker polling.
-- `priority` (`int`): higher runs first.
+- `route` (`str`, default `"default"`): route name for selective worker polling.
+- `priority` (`int`, default `0`): higher runs first; range **-100..100**.
 - `task_id` (`str | None`): explicit ID (auto-generated otherwise).
 
 **Returns** `str` — the task ID. **Raises** `ValueError` on bad input,
@@ -47,7 +47,7 @@ task_id = await queue.submit(
 )
 ```
 
-### `submit_many(tasks, *, retry_policy=None, route="default", priority=0)`
+### `submit_many(tasks, *, retry_policy=None, route="default", priority=0, scheduled_for=None)`
 
 Submit many `(task_type, payload)` tuples in a single transaction.
 
@@ -58,7 +58,7 @@ Submit many `(task_type, payload)` tuples in a single transaction.
 | Method | Returns |
 |---|---|
 | `get_task(task_id)` | `Task | None` |
-| `list_pending_tasks(limit=10, offset=0)` | `list[Task]` |
+| `list_pending_tasks(limit=10, offset=0, route=None)` | `list[Task]` |
 | `list_completed_tasks(limit=10, offset=0)` | `list[Task]` |
 | `list_failed_tasks(limit=10, offset=0)` | `list[Task]` |
 | `count_tasks_by_status(status)` | `int` |
@@ -72,6 +72,29 @@ Submit many `(task_type, payload)` tuples in a single transaction.
 | `retry_dlq_task(task_id)` | `str` |
 | `discard_dlq_task(task_id, reason=None)` | `None` |
 | `count_dlq_tasks()` | `int` |
+
+### Recurring-task management
+
+```python
+rid = await queue.schedule_recurring(
+    "cleanup", {"keep": 30}, "0 2 * * *",   # task_type, payload, cron (UTC)
+    route="default", priority=0, retry_policy=None, enabled=True,
+    recurring_id=None,
+)
+```
+
+| Method | Returns |
+|---|---|
+| `schedule_recurring(task_type, payload, cron_expression, *, route="default", priority=0, retry_policy=None, enabled=True, recurring_id=None)` | `str` — the definition ID |
+| `list_recurring_tasks(limit=10, offset=0)` | `list[RecurringTask]` |
+| `get_recurring_task(recurring_id)` | `RecurringTask | None` |
+| `pause_recurring(recurring_id)` | `None` — disables firing |
+| `resume_recurring(recurring_id)` | `None` — re-enables firing |
+| `delete_recurring_task(recurring_id)` | `None` |
+
+`cron_expression` is a standard 5-field cron evaluated in **UTC**; missed
+occurrences are skipped (no backfill). `schedule_recurring` raises `ValueError`
+on an invalid cron/priority/route and `TaskError` on a duplicate `recurring_id`.
 
 ---
 
@@ -94,7 +117,13 @@ async with Worker(database_url="postgresql://...") as worker:
 routes=None, log_level="INFO", pool_min_size=2, pool_max_size=10,
 pool_timeout=30.0, command_timeout=60.0, heartbeat_interval=10.0,
 graceful_shutdown_timeout=30.0, metrics_port=8000, metrics_enabled=True,
-health_enabled=True)`
+health_enabled=True, enable_scheduler=False, grpc_port=50051,
+grpc_enabled=False, grpc_max_message_size=None)`
+
+> `routes=None` polls **all** routes (no route filter).  Pass a list such as
+> `routes=["critical"]` to poll only those routes.  The CLI/`ROUTES` env var
+> defaults to `["default"]` for predictability — see
+> [Configuration](configuration.md).
 
 ### `@worker.task(task_type)`
 
@@ -107,7 +136,7 @@ is not async.
 
 | Method | Description |
 |---|---|
-| `async run()` | Start the event loop; polls and executes until shutdown. Handles `SIGTERM`/`SIGINT`. Starts heartbeat + metrics/health server. |
+| `async run()` | Start the event loop; polls and executes until shutdown. Handles `SIGTERM`/`SIGINT`. Starts heartbeat + metrics/health + optional gRPC server. |
 | `async run_once()` | Run a single poll-and-execute cycle (testing/debugging; no heartbeat/metrics). |
 | `async shutdown()` | Graceful shutdown: stop polling, wait for in-flight tasks (with timeout), send final heartbeat, disconnect. |
 | `get_status()` | Dict with worker health info (uptime, processed/failed counts, current task, etc.). |
@@ -137,6 +166,150 @@ async with DeadLetterQueue(database_url="postgresql://...") as dlq:
 
 ---
 
+## RecurringScheduler
+
+Creates task instances for due recurring definitions.
+
+```python
+from conductor import RecurringScheduler
+
+async with RecurringScheduler(database_url="postgresql://...") as sched:
+    await sched.run()   # runs until SIGTERM/SIGINT
+```
+
+| Method | Description |
+|---|---|
+| `async run()` | Perpetual loop: sweep every `scheduler_interval` seconds until shutdown. Handles `SIGTERM`/`SIGINT`. |
+| `async run_once()` | Single sweep (testing/debugging; no signal handlers). |
+| `async shutdown()` | Graceful shutdown: stop the loop and close the pool. |
+| `get_status()` | Dict with uptime, `tasks_fired_total`, `last_sweep_at`, config, connection state. |
+
+Constructor: `RecurringScheduler(database_url, *, scheduler_interval=1.0, poll_batch_size=50,
+log_level="INFO", pool_min_size=1, pool_max_size=5, pool_timeout=30.0, command_timeout=60.0)`.
+
+Each sweep claims due definitions with `FOR UPDATE SKIP LOCKED` (safe for
+multiple schedulers), creates one task instance per fire, and advances
+`next_run_at` to the next cron time (UTC, skipping missed runs).  A
+`Worker(enable_scheduler=True)` embeds a scheduler in-process.
+
+---
+
+## gRPC API
+
+A Worker can embed an async gRPC server (`Worker(grpc_enabled=True)`) exposing
+the `ConductorWorker` service, so polyglot clients (Go, Rust, Node.js, Python)
+can execute tasks and inspect worker state.
+
+```python
+from conductor import Worker
+
+worker = Worker(database_url="...", grpc_enabled=True, grpc_port=50051)
+```
+
+### Service — `conductor.proto`
+
+```proto
+service ConductorWorker {
+  rpc ProcessTask(TaskRequest) returns (TaskResponse);
+  rpc RegisterHandler(RegisterRequest) returns (RegisterResponse);
+  rpc GetWorkerStatus(StatusRequest) returns (WorkerStatus);
+}
+```
+
+- `TaskRequest { task_id, task_type, payload /* JSON bytes */, persist }`
+- `TaskResponse { task_id, success, result /* JSON bytes */, error }`
+- `RegisterRequest { task_type }` / `RegisterResponse { registered, task_type, error }`
+- `WorkerStatus { worker_id, status, uptime_seconds, tasks_processed_total,
+  tasks_failed_total, registered_handlers, grpc_enabled, grpc_port }`
+
+### `ProcessTask`
+
+Executes a task through the worker's registered handler and returns the result
+or error.  By default this is **pure execution** — no writes to
+`conductor_tasks`.  Set `persist=true` to record the outcome (processing →
+completed/failed, with metrics and retry/DLQ handling) exactly like a polled
+task.
+
+### `RegisterHandler`
+
+Registers a `task_type` on the worker (idempotent).  A remotely registered
+type appears in `GetWorkerStatus`; executing it in-process reports a clear
+error.  It cannot be re-registered with the `@worker.task()` decorator.
+
+### `GetWorkerStatus`
+
+Returns the worker's health and statistics (mirrors `Worker.get_status()`).
+
+### Error mapping
+
+Transport-level errors (empty `task_type`, malformed JSON payload) abort with
+gRPC status codes (`INVALID_ARGUMENT`).  Handler failures are returned in-band
+as `success=false` with the error message.
+
+### Client example
+
+```python
+from grpc import aio as grpc_aio
+from conductor.grpc import conductor_pb2, conductor_pb2_grpc
+
+channel = grpc_aio.insecure_channel("localhost:50051")
+stub = conductor_pb2_grpc.ConductorWorkerStub(channel)
+resp = await stub.ProcessTask(conductor_pb2.TaskRequest(
+    task_type="echo", payload=b'{"message":"hi"}',
+))
+```
+
+See `examples/8_grpc_client.py` (working Python client) and
+`examples/grpc/` (Go/Rust/Node reference stubs).
+
+---
+
+## Web Dashboard API
+
+A **FastAPI** app (`conductor/api/`) serves a JSON API plus the built React
+frontend. Run it standalone with `conductor api` or embed it in a worker with
+`Worker(api_enabled=True)`.
+
+```python
+from conductor import DashboardServer
+from conductor.db.connection import DatabasePool
+
+pool = DatabasePool(dsn="postgresql://...")
+await pool.connect()
+server = DashboardServer(pool, api_key=None, host="0.0.0.0", port=8080)
+await server.start()
+...
+await server.stop()
+await pool.disconnect()
+```
+
+### Endpoints
+
+All endpoints are under `/api` and (when an API key is configured) require an
+`X-API-Key` header; unset key = open access. The built SPA is served at `/`.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/tasks` | List tasks (`status`, `route`, `task_type`, `search`, `limit`, `offset`) → `{items, total, limit, offset}` |
+| `GET` | `/api/tasks/{id}` | Task details plus `retries` history (404 if missing) |
+| `POST` | `/api/tasks/{id}/cancel` | Cancel a pending/retrying task → `{status:"cancelled"}` (404 missing, 409 not cancellable) |
+| `GET` | `/api/workers` | All registered workers, newest heartbeat first |
+| `GET` | `/api/metrics` | Prometheus metrics as JSON (`{metrics:[{name,type,help,samples}]}`) |
+| `GET` | `/api/dlq` | Dead-letter tasks (`limit`, `offset`, `include_discarded`) |
+| `POST` | `/api/dlq/{id}/retry` | Requeue a DLQ task as pending → `{task_id}` (404 missing) |
+| `POST` | `/api/dlq/{id}/discard` | Soft-delete a DLQ task → `{status:"discarded", task_id}` (404 missing) |
+| `GET` | `/api/health` | `HealthResult.to_dict()` |
+
+### `TaskQueue.cancel_task(task_id)`
+
+Cancels a pending or retrying task, setting its status to `cancelled` and
+stamping `completed_at`. Raises `TaskError` if the task is missing or is not
+in a cancellable state (`processing`/`completed`/`failed`/`cancelled`). The
+`CANCELLED` status is enforced by the `chk_task_status` CHECK constraint
+(schema **v4**); `SchemaManager.ensure_schema()` migrates v3 databases.
+
+---
+
 ## Models
 
 ### `Task`
@@ -148,7 +321,8 @@ Frozen dataclass. Key fields: `task_id`, `task_type`, `payload`, `status`,
 
 ### `TaskStatus`
 
-`(str, Enum)`: `PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`, `RETRYING`.
+`(str, Enum)`: `PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`, `RETRYING`,
+`CANCELLED`.
 
 ### `RetryPolicy`
 
@@ -159,8 +333,17 @@ Frozen dataclass: `max_retries=3`, `backoff_strategy="exponential"`,
 ### `DLQTask`
 
 Frozen dataclass: `task_id`, `task_type`, `payload`, `error_message`,
-`attempts`, `retry_policy`, `moved_at`, `discarded`, `discard_reason`,
-`discarded_at`. `to_dict()` / `from_dict()`.
+`attempts`, `retry_policy`, `route`, `priority`, `moved_at`, `discarded`,
+`discard_reason`, `discarded_at`. `to_dict()` / `from_dict()`.
+
+The `route`/`priority` fields preserve how the task was submitted so that
+`retry_task()` restores it to the correct route and priority.
+
+### `RecurringTask`
+
+Frozen dataclass describing a cron definition: `id`, `task_type`, `payload`,
+`cron_expression`, `route`, `priority`, `retry_policy`, `enabled`,
+`next_run_at`, `last_run_at`, `created_at`. `to_dict()` / `from_dict()`.
 
 ### `WorkerInfo`, `WorkerStatus`, `RetryRecord`
 

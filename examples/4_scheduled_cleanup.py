@@ -2,9 +2,9 @@
 Example 4 — Scheduled cleanup (manual scheduling).
 
 Shows the scheduled-task pattern: a task with a future ``scheduled_for``
-is not polled until its time arrives. Native cron/scheduling is a v0.2
-feature; for v0.1, schedule with ``scheduled_for`` and trigger
-submissions from an external cron job / systemd timer.
+is not polled until its time arrives.  For one-off future runs use
+``scheduled_for``; for repeating (cron) runs see
+``examples/7_recurring_tasks.py`` (``schedule_recurring`` + scheduler).
 
 Expected output (paraphrased)::
 
@@ -66,11 +66,11 @@ async def main() -> None:
             assert after is not None
             print(f"After due time: status={after.status.value}, result={after.result}")
 
-        # For recurring runs, submit on a schedule from cron/systemd:
-        #   0 2 * * *  conductor-demo-submit  (see examples/README.md)
+        # For recurring runs, prefer the native cron scheduler (v0.2):
+        #   await queue.schedule_recurring("cleanup_expired_sessions", {...}, "0 2 * * *")
         print(
-            "Tip: for recurring runs, trigger submissions from cron or a "
-            "systemd timer (native cron is planned for v0.2)."
+            "Tip: for recurring runs, use schedule_recurring() + the "
+            "RecurringScheduler (see examples/7_recurring_tasks.py)."
         )
 
 

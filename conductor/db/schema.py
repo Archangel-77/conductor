@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 
 from conductor.db.connection import DatabasePool
+from conductor.exceptions import ConductorException
 
 logger = logging.getLogger("conductor.db.schema")
 
@@ -18,7 +19,7 @@ logger = logging.getLogger("conductor.db.schema")
 # Version tracking
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 4
 """The current schema version expected by this code."""
 
 CREATE_VERSION_TABLE = """
@@ -54,7 +55,10 @@ CREATE TABLE IF NOT EXISTS conductor_tasks (
 
     CONSTRAINT pk_tasks PRIMARY KEY (task_id),
     CONSTRAINT chk_task_status CHECK (
-        status IN ('pending', 'processing', 'completed', 'failed', 'retrying')
+        status IN (
+            'pending', 'processing', 'completed', 'failed', 'retrying',
+            'cancelled'
+        )
     ),
     CONSTRAINT chk_task_priority CHECK (priority >= -100 AND priority <= 100),
     CONSTRAINT chk_task_attempt CHECK (attempt >= 0),
@@ -107,6 +111,8 @@ CREATE TABLE IF NOT EXISTS conductor_dead_letter (
     error_message   TEXT,
     attempts        INTEGER     NOT NULL DEFAULT 0,
     retry_policy    JSONB       NOT NULL DEFAULT '{}',
+    route           TEXT        NOT NULL DEFAULT 'default',
+    priority        INTEGER     NOT NULL DEFAULT 0,
     moved_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     discarded       BOOLEAN     NOT NULL DEFAULT FALSE,
     discard_reason  TEXT,
@@ -133,6 +139,47 @@ CREATE TABLE IF NOT EXISTS conductor_recurring_tasks (
     CONSTRAINT pk_recurring_tasks PRIMARY KEY (id)
 );
 """
+
+# ---------------------------------------------------------------------------
+# v1 → v2 migration
+# ---------------------------------------------------------------------------
+
+# Statements to add ``route``/``priority`` to the dead-letter table.
+# Idempotent (``IF NOT EXISTS``), so it is safe to re-run on an
+# already-migrated schema.  The columns let routed/prioritized tasks keep
+# their routing metadata when retried from the DLQ.
+MIGRATE_V1_TO_V2_SQL = [
+    "ALTER TABLE conductor_dead_letter "
+    "ADD COLUMN IF NOT EXISTS route TEXT NOT NULL DEFAULT 'default';",
+    "ALTER TABLE conductor_dead_letter "
+    "ADD COLUMN IF NOT EXISTS priority INTEGER NOT NULL DEFAULT 0;",
+]
+
+# ---------------------------------------------------------------------------
+# v2 → v3 migration
+# ---------------------------------------------------------------------------
+
+# Composite index for the recurring scheduler's hot query
+# (``WHERE enabled AND next_run_at <= $1``).  Idempotent (``IF NOT EXISTS``).
+MIGRATE_V2_TO_V3_SQL = [
+    "CREATE INDEX IF NOT EXISTS idx_recurring_polling"
+    " ON conductor_recurring_tasks (enabled, next_run_at);",
+]
+
+# ---------------------------------------------------------------------------
+# v3 → v4 migration
+# ---------------------------------------------------------------------------
+
+# Allow ``cancelled`` in the task status CHECK constraint.  ``DROP CONSTRAINT``
+# is idempotent, and re-adding the constraint with the extended status list
+# keeps the CHECK up to date on existing v3 databases.
+MIGRATE_V3_TO_V4_SQL = [
+    "ALTER TABLE conductor_tasks DROP CONSTRAINT chk_task_status;",
+    "ALTER TABLE conductor_tasks ADD CONSTRAINT chk_task_status CHECK ("
+    " status IN ('pending', 'processing', 'completed', 'failed', 'retrying',"
+    " 'cancelled')"
+    ");",
+]
 
 # ---------------------------------------------------------------------------
 # Indexes
@@ -174,6 +221,8 @@ RECURRING_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_recurring_next_run"
     " ON conductor_recurring_tasks (next_run_at);",
     "CREATE INDEX IF NOT EXISTS idx_recurring_enabled" " ON conductor_recurring_tasks (enabled);",
+    "CREATE INDEX IF NOT EXISTS idx_recurring_polling"
+    " ON conductor_recurring_tasks (enabled, next_run_at);",
 ]
 
 # ---------------------------------------------------------------------------
@@ -216,7 +265,8 @@ class SchemaManager:
         """Ensure the database schema is up-to-date.
 
         Creates the version table if needed, then runs any pending
-        migrations.  Safe to call multiple times (idempotent).
+        migrations step by step (v0→v1, v1→v2, …).  Safe to call multiple
+        times (idempotent).
         """
         await self._create_version_table()
         current_version = await self._get_current_version()
@@ -227,7 +277,8 @@ class SchemaManager:
                 current_version,
                 SCHEMA_VERSION,
             )
-            await self._migrate_v0_to_v1()
+            for target_version in range(current_version + 1, SCHEMA_VERSION + 1):
+                await self._run_migration(target_version)
         else:
             logger.info("Schema is already at v%s.", SCHEMA_VERSION)
 
@@ -299,8 +350,88 @@ class SchemaManager:
 
                 # Record version
                 await conn.execute(
-                    "INSERT INTO conductor_version (version) VALUES ($1)",
-                    SCHEMA_VERSION,
+                    "INSERT INTO conductor_version (version) VALUES ($1) "
+                    "ON CONFLICT (version) DO NOTHING",
+                    1,
                 )
 
         logger.info("Migration v0 → v1 completed successfully.")
+
+    async def _migrate_v1_to_v2(self) -> None:
+        """Run the v1 → v2 migration (dead-letter route/priority columns).
+
+        The columns are idempotently added so this is safe on both fresh
+        installs (where the base table already includes them) and existing
+        v1 databases.
+        """
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                for stmt in MIGRATE_V1_TO_V2_SQL:
+                    await conn.execute(stmt)
+
+                # Record version
+                await conn.execute(
+                    "INSERT INTO conductor_version (version) VALUES ($1) "
+                    "ON CONFLICT (version) DO NOTHING",
+                    2,
+                )
+
+        logger.info("Migration v1 → v2 completed successfully.")
+
+    async def _migrate_v2_to_v3(self) -> None:
+        """Run the v2 → v3 migration (recurring scheduler composite index).
+
+        Adds an index on ``(enabled, next_run_at)`` for the recurring
+        scheduler's hot query.  Idempotent (``IF NOT EXISTS``), safe on both
+        fresh installs and existing v2 databases.
+        """
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                for stmt in MIGRATE_V2_TO_V3_SQL:
+                    await conn.execute(stmt)
+
+                # Record version
+                await conn.execute(
+                    "INSERT INTO conductor_version (version) VALUES ($1) "
+                    "ON CONFLICT (version) DO NOTHING",
+                    3,
+                )
+
+        logger.info("Migration v2 → v3 completed successfully.")
+
+    async def _migrate_v3_to_v4(self) -> None:
+        """Run the v3 → v4 migration (``cancelled`` task status).
+
+        Rebuilds the ``chk_task_status`` CHECK constraint to allow the new
+        ``cancelled`` status, and records schema version 4.
+        """
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                for stmt in MIGRATE_V3_TO_V4_SQL:
+                    await conn.execute(stmt)
+
+                # Record version
+                await conn.execute(
+                    "INSERT INTO conductor_version (version) VALUES ($1) "
+                    "ON CONFLICT (version) DO NOTHING",
+                    4,
+                )
+
+        logger.info("Migration v3 → v4 completed successfully.")
+
+    async def _run_migration(self, target_version: int) -> None:
+        """Run the single migration step that lands on *target_version*.
+
+        Raises:
+            ConductorException: If no migration is defined for the target.
+        """
+        if target_version == 1:
+            await self._migrate_v0_to_v1()
+        elif target_version == 2:
+            await self._migrate_v1_to_v2()
+        elif target_version == 3:
+            await self._migrate_v2_to_v3()
+        elif target_version == 4:
+            await self._migrate_v3_to_v4()
+        else:
+            raise ConductorException(f"No migration defined for schema v{target_version}.")

@@ -11,8 +11,11 @@ import logging
 from datetime import datetime
 from typing import Any, Optional
 
+from croniter import croniter as croniter_cls
+
 from conductor.core.models import (
     DLQTask,
+    RecurringTask,
     RetryPolicy,
     Task,
     TaskStatus,
@@ -26,6 +29,41 @@ from conductor.exceptions import TaskError
 from conductor.observability.metrics import inc_tasks_submitted
 
 logger = logging.getLogger("conductor.core.queue")
+
+# ---------------------------------------------------------------------------
+# Validation helpers
+# ---------------------------------------------------------------------------
+
+PRIORITY_MIN = -100
+"""Minimum allowed task priority (matches the DB CHECK constraint)."""
+
+PRIORITY_MAX = 100
+"""Maximum allowed task priority (matches the DB CHECK constraint)."""
+
+
+def _validate_priority(priority: int) -> None:
+    """Validate a task priority is an integer within the allowed range.
+
+    Raises:
+        ValueError: If ``priority`` is not an int or is outside
+                    ``[PRIORITY_MIN, PRIORITY_MAX]``.
+    """
+    if isinstance(priority, bool) or not isinstance(priority, int):
+        raise ValueError("priority must be an integer")
+    if not (PRIORITY_MIN <= priority <= PRIORITY_MAX):
+        raise ValueError(
+            f"priority must be between {PRIORITY_MIN} and {PRIORITY_MAX} " f"(got {priority})"
+        )
+
+
+def _validate_route(route: str) -> None:
+    """Validate a route name is a non-empty string.
+
+    Raises:
+        ValueError: If ``route`` is not a non-empty string.
+    """
+    if not isinstance(route, str) or not route.strip():
+        raise ValueError("route must be a non-empty string")
 
 
 class TaskQueue:
@@ -152,6 +190,8 @@ class TaskQueue:
             raise ValueError("task_type must not be empty")
         if not isinstance(payload, dict):
             raise ValueError("payload must be a dict")
+        _validate_route(route)
+        _validate_priority(priority)
 
         rp = retry_policy or RetryPolicy()
         rp.validate()
@@ -193,6 +233,7 @@ class TaskQueue:
         retry_policy: Optional[RetryPolicy] = None,
         route: str = "default",
         priority: int = 0,
+        scheduled_for: Optional[datetime] = None,
     ) -> list[str]:
         """Submit multiple tasks in a single database transaction.
 
@@ -206,6 +247,7 @@ class TaskQueue:
             retry_policy: Shared retry config for all tasks.
             route: Shared route for all tasks.
             priority: Shared priority for all tasks.
+            scheduled_for: Shared earliest pickup time for all tasks.
 
         Returns:
             A list of task IDs in the same order as the input.
@@ -225,6 +267,8 @@ class TaskQueue:
                 raise ValueError("task_type must not be empty")
             if not isinstance(payload, dict):
                 raise ValueError("payload must be a dict")
+        _validate_route(route)
+        _validate_priority(priority)
 
         # Build all task dicts up-front
         task_dicts: list[dict[str, Any]] = []
@@ -240,6 +284,7 @@ class TaskQueue:
                 retry_policy=rp,
                 attempt=0,
                 max_retries=rp.max_retries,
+                scheduled_for=scheduled_for,
                 created_at=now,
             )
             task_dicts.append(_task_to_db_dict(task))
@@ -287,6 +332,7 @@ class TaskQueue:
         self,
         limit: int = 10,
         offset: int = 0,
+        route: Optional[str] = None,
     ) -> list[Task]:
         """List pending tasks eligible for processing.
 
@@ -295,14 +341,21 @@ class TaskQueue:
         Args:
             limit: Maximum number of tasks to return.
             offset: Number of tasks to skip (for pagination).
+            route: If set, only return tasks submitted to this route.
 
         Returns:
             A list of ``Task`` objects.
+
+        Raises:
+            ValueError: If ``route`` is set but not a non-empty string.
         """
         self._require_connected()
+        if route is not None:
+            _validate_route(route)
         rows = await self._query.select_pending_tasks(
             limit=limit,
             offset=offset,
+            route=route,
         )
         return [Task.from_dict(r) for r in rows]
 
@@ -355,13 +408,36 @@ class TaskQueue:
 
         Args:
             status: One of ``pending``, ``processing``, ``completed``,
-                    ``failed``, ``retrying``.
+                    ``failed``, ``retrying``, ``cancelled``.
 
         Returns:
             The number of tasks in that status.
         """
         self._require_connected()
         return await self._query.count_tasks_by_status(status)
+
+    async def cancel_task(self, task_id: str) -> None:
+        """Cancel a pending or retrying task.
+
+        Sets the task's status to ``cancelled`` so it will never be picked
+        up by a worker.  Only tasks in ``pending`` or ``retrying`` can be
+        cancelled.
+
+        Args:
+            task_id: The unique task identifier.
+
+        Raises:
+            TaskError: If the task does not exist or is not cancellable
+                (``processing``, ``completed``, ``failed`` or ``cancelled``).
+        """
+        self._require_connected()
+        if not await self._query.cancel_task(task_id):
+            task = await self._query.select_task(task_id)
+            if task is None:
+                raise TaskError(f"Task '{task_id}' not found.")
+            raise TaskError(
+                f"Task '{task_id}' cannot be cancelled from status " f"'{task['status']}'."
+            )
 
     # ------------------------------------------------------------------
     # Dead-letter queue queries
@@ -515,6 +591,163 @@ class TaskQueue:
         )
 
     # ------------------------------------------------------------------
+    # Recurring task management
+    # ------------------------------------------------------------------
+
+    async def schedule_recurring(
+        self,
+        task_type: str,
+        payload: dict[str, Any],
+        cron_expression: str,
+        *,
+        route: str = "default",
+        priority: int = 0,
+        retry_policy: Optional[RetryPolicy] = None,
+        enabled: bool = True,
+        recurring_id: Optional[str] = None,
+    ) -> str:
+        """Register a cron-driven recurring task definition.
+
+        The scheduler creates one task instance per cron fire.
+
+        Args:
+            task_type: Logical type of the task instances to create.
+            payload: Payload copied into every generated task.
+            cron_expression: Standard 5-field cron expression (UTC).
+            route: Route for generated tasks.
+            priority: Priority for generated tasks (higher runs first).
+            retry_policy: Retry policy applied to generated tasks.
+            enabled: Whether the definition starts enabled.
+            recurring_id: Optional explicit ID (auto-generated if omitted).
+
+        Returns:
+            The recurring definition ID.
+
+        Raises:
+            ValueError: On invalid ``task_type``/``payload``/``route``/
+                        ``priority``/``cron_expression``.
+            TaskError: If the ``recurring_id`` already exists.
+        """
+        self._require_connected()
+
+        if not task_type or not task_type.strip():
+            raise ValueError("task_type must not be empty")
+        if not isinstance(payload, dict):
+            raise ValueError("payload must be a dict")
+        _validate_route(route)
+        _validate_priority(priority)
+
+        rp = retry_policy or RetryPolicy()
+        rp.validate()
+
+        rid = recurring_id or generate_task_id()
+        now = utc_now()
+        # Validates the cron expression (raises ValueError) and computes the
+        # first future fire time in UTC.
+        next_run_at = _next_cron_run(cron_expression, now)
+
+        recurring = RecurringTask(
+            id=rid,
+            task_type=task_type,
+            payload=payload,
+            cron_expression=cron_expression,
+            route=route,
+            priority=priority,
+            retry_policy=rp,
+            enabled=enabled,
+            next_run_at=next_run_at,
+            created_at=now,
+        )
+        inserted_id = await self._query.insert_recurring_task(_recurring_to_db_dict(recurring))
+        logger.info(
+            "Recurring task scheduled: %s (%s) cron=%s",
+            inserted_id,
+            task_type,
+            cron_expression,
+            extra={
+                "recurring_id": inserted_id,
+                "task_type": task_type,
+                "cron_expression": cron_expression,
+            },
+        )
+        return inserted_id
+
+    async def list_recurring_tasks(
+        self,
+        limit: int = 10,
+        offset: int = 0,
+    ) -> list[RecurringTask]:
+        """List recurring definitions, newest first.
+
+        Args:
+            limit: Maximum number of definitions to return.
+            offset: Number of definitions to skip (for pagination).
+
+        Returns:
+            A list of ``RecurringTask`` objects.
+        """
+        self._require_connected()
+        rows = await self._query.select_recurring_tasks(limit=limit, offset=offset)
+        return [RecurringTask.from_dict(r) for r in rows]
+
+    async def get_recurring_task(self, recurring_id: str) -> Optional[RecurringTask]:
+        """Fetch a single recurring definition by ID.
+
+        Returns:
+            A ``RecurringTask`` object or ``None`` if not found.
+        """
+        self._require_connected()
+        row = await self._query.select_recurring_task(recurring_id)
+        if row is None:
+            return None
+        return RecurringTask.from_dict(row)
+
+    async def pause_recurring(self, recurring_id: str) -> None:
+        """Disable a recurring definition so it no longer fires.
+
+        Raises:
+            TaskError: If the definition does not exist.
+        """
+        await self._set_recurring_enabled(recurring_id, enabled=False)
+
+    async def resume_recurring(self, recurring_id: str) -> None:
+        """Re-enable a paused recurring definition.
+
+        Raises:
+            TaskError: If the definition does not exist.
+        """
+        await self._set_recurring_enabled(recurring_id, enabled=True)
+
+    async def delete_recurring_task(self, recurring_id: str) -> None:
+        """Delete a recurring definition permanently.
+
+        Raises:
+            TaskError: If the definition does not exist.
+        """
+        self._require_connected()
+        deleted = await self._query.delete_recurring_task(recurring_id)
+        if not deleted:
+            raise TaskError(f"Recurring task '{recurring_id}' not found.")
+        logger.info(
+            "Recurring task %s deleted.",
+            recurring_id,
+            extra={"recurring_id": recurring_id},
+        )
+
+    async def _set_recurring_enabled(self, recurring_id: str, enabled: bool) -> None:
+        """Toggle a recurring definition's ``enabled`` flag."""
+        self._require_connected()
+        updated = await self._query.set_recurring_enabled(recurring_id, enabled)
+        if not updated:
+            raise TaskError(f"Recurring task '{recurring_id}' not found.")
+        logger.info(
+            "Recurring task %s %s.",
+            recurring_id,
+            "resumed" if enabled else "paused",
+            extra={"recurring_id": recurring_id, "enabled": enabled},
+        )
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
@@ -604,3 +837,35 @@ def _task_to_db_dict(task: Task) -> dict[str, Any]:
         "started_at": task.started_at,
         "completed_at": task.completed_at,
     }
+
+
+def _recurring_to_db_dict(recurring: RecurringTask) -> dict[str, Any]:
+    """Convert a ``RecurringTask`` to the dict format for ``QueryBuilder``.
+
+    Keeps datetime fields as native Python ``datetime`` objects.
+    """
+    return {
+        "id": recurring.id,
+        "task_type": recurring.task_type,
+        "payload": recurring.payload,
+        "cron_expression": recurring.cron_expression,
+        "route": recurring.route,
+        "priority": recurring.priority,
+        "retry_policy": recurring.retry_policy.to_dict(),
+        "enabled": recurring.enabled,
+        "next_run_at": recurring.next_run_at,
+        "last_run_at": recurring.last_run_at,
+        "created_at": recurring.created_at,
+    }
+
+
+def _next_cron_run(expression: str, after: datetime) -> datetime:
+    """Return the next cron fire time strictly after *after* (UTC).
+
+    Raises:
+        ValueError: If ``expression`` is not a valid cron expression.
+    """
+    try:
+        return croniter_cls(expression, after).get_next(datetime)
+    except (ValueError, KeyError) as exc:
+        raise ValueError(f"Invalid cron expression '{expression}': {exc}") from exc

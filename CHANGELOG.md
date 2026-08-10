@@ -9,7 +9,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Nothing yet.
+- **Task routing** — tasks are submitted with a `route` (default `"default"`);
+  workers poll only the routes they subscribe to via `Worker(routes=[...])` or
+  the `ROUTES` env var. `Worker(routes=None)` polls **all** routes (no filter).
+- **Priority queues** — tasks carry a `priority` in the range **-100..100**
+  (default `0`). The polling query orders by `priority DESC, created_at ASC`,
+  so higher-priority tasks are dispatched first even when submitted later.
+- **`TaskQueue.list_pending_tasks(limit, offset, route=None)`** — optional route
+  filter on the pending-tasks listing.
+- **DLQ routing preservation (schema v2)** — `conductor_dead_letter` now stores
+  `route`/`priority`, so routed/prioritized tasks keep their routing metadata
+  when retried via `DeadLetterQueue.retry_task()` (including re-inserted tasks).
+  `SchemaManager` migrates existing v1 databases incrementally to v2.
+- **Fail-fast validation** — `submit()`/`submit_many()` validate `priority`
+  (int, -100..100) and `route` (non-empty string) up-front, raising `ValueError`
+  instead of failing later at the database layer.
+- **Recurring (cron) tasks** — `TaskQueue.schedule_recurring(task_type, payload,
+  cron_expression, ...)` registers a cron definition; `list_recurring_tasks()`,
+  `get_recurring_task()`, `pause_recurring()`, `resume_recurring()`, and
+  `delete_recurring_task()` manage them.
+- **`RecurringScheduler`** (`conductor/recurring/`) — a daemon that polls due
+  definitions and creates one task instance per fire, advancing `next_run_at`
+  to the next cron fire (UTC, skipping missed runs). Due definitions are claimed
+  with `FOR UPDATE SKIP LOCKED` (safe for multiple schedulers). Can be embedded
+  in a worker via `Worker(enable_scheduler=True)` / `CONDUCTOR_ENABLE_SCHEDULER`.
+- **`submit_many(scheduled_for=...)`** — shared earliest-pickup time for a batch
+  (previously only single `submit()` supported it).
+- **Schema v3** — composite `idx_recurring_polling (enabled, next_run_at)` index
+  for the scheduler's hot query; `SchemaManager` migrates v2 databases to v3.
+- **New dependency** — `croniter>=1.4` for cron expression parsing.
+- **Metrics** — `conductor_recurring_fired_total{task_type=...}` counter.
+- **gRPC API (polyglot workers)** — a Worker can embed an async `grpc.aio`
+  server (`Worker(grpc_enabled=True)` / `GRPC_ENABLED`) exposing the
+  `ConductorWorker` service: `ProcessTask` (execute through a registered
+  handler; optional `persist=true` records the outcome), `RegisterHandler`
+  (idempotent runtime handler registration), and `GetWorkerStatus`.
+- **`conductor/grpc/`** — committed generated stubs (`conductor_pb2`,
+  `conductor_pb2_grpc`) plus hand-maintained `.pyi` type stubs; regenerate via
+  `python scripts/generate_grpc.py`. No `protoc` needed at install.
+- **Dependencies** — `grpcio>=1.60` (runtime); `grpcio-tools`, `grpc-stubs`,
+  `types-protobuf` (dev).
+- **Config** — `GRPC_ENABLED`, `GRPC_PORT` (default 50051),
+  `GRPC_MAX_MESSAGE_SIZE` env vars; `Worker(grpc_port, grpc_enabled,
+  grpc_max_message_size)`; `get_status()` reports gRPC state.
+- **Examples** — `examples/8_grpc_client.py` (Python client) and
+  `examples/grpc/` Go/Rust/Node reference stubs.
+- **Web dashboard** — a FastAPI app (`conductor/api/`) exposes a JSON API
+  (`/api/tasks`, `/api/tasks/{id}`, `/api/tasks/{id}/cancel`, `/api/workers`,
+  `/api/metrics`, `/api/dlq` + retry/discard, `/api/health`) and serves a
+  built React + Vite frontend (`conductor/web/`) with five screens (Tasks,
+  Task details, Workers, Metrics, DLQ). Optional API-key auth
+  (`CONDUCTOR_API_KEY` → `X-API-Key` header; unset = open).
+- **`TaskStatus.CANCELLED` (schema v4)** — new task status for cancelled
+  tasks; `TaskQueue.cancel_task()` cancels pending/retrying tasks only
+  (`TaskError` otherwise); `chk_task_status` CHECK rebuilt by the v3→v4
+  migration.
+- **Dashboard read queries** — non-locking `QueryBuilder.select_tasks()`
+  (cross-status, ILIKE search, pagination), `count_tasks()`, and
+  `select_all_workers()` for the dashboard (never reuse the locked
+  `select_pending_tasks` for reads).
+- **`DashboardServer`** (`conductor/api/server.py`) — uvicorn-backed embeddable
+  server; standalone via `conductor api [--host --port --api-key --env-file]`
+  or embedded in a worker (`Worker(api_enabled=True)` /
+  `CONDUCTOR_API_ENABLED` / `CONDUCTOR_API_PORT` / `CONDUCTOR_API_KEY`).
+- **Committed frontend bundle** — `conductor/web/dist` is committed and
+  packaged (`[tool.setuptools.package-data]`), so no Node.js is needed at
+  install; regenerate with `scripts/build_frontend.sh` (CI `frontend` job
+  verifies freshness).
+- **Dependencies** — `fastapi>=0.110`, `uvicorn>=0.29` (runtime); `httpx`
+  (dev).
+- **Example** — `examples/9_web_dashboard.py` (standalone dashboard server).
 
 ## [0.1.0] - 2026-07-31
 

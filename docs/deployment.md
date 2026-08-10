@@ -94,6 +94,38 @@ sudo systemctl enable --now conductor-worker
 It runs `conductor worker` under a dedicated `conductor` user with
 `EnvironmentFile` pointing at your `.env` file.
 
+## Web Dashboard
+
+The dashboard (FastAPI + built React frontend) ships inside the wheel, so no
+Node.js toolchain is required at deploy time — the committed `conductor/web/dist`
+bundle is served automatically.
+
+**Standalone** (separate process, shares the same PostgreSQL):
+
+```bash
+conductor api --host 0.0.0.0 --port 8080
+CONDUCTOR_API_KEY=s3cret conductor api   # require X-API-Key on /api/*
+```
+
+**Embedded in a worker** (serves on the worker's `CONDUCTOR_API_PORT`, default
+8080):
+
+```bash
+CONDUCTOR_API_ENABLED=true conductor worker
+```
+
+The dashboard binds its own port (`CONDUCTOR_API_PORT` / `--port`, default
+8080) and is independent of the metrics/health port (`METRICS_PORT`, default
+8000). The built SPA is served at `/`; the JSON API lives under `/api`.
+
+**Rebuilding the frontend** (only needed when the React sources change):
+
+```bash
+scripts/build_frontend.sh      # npm ci && npm run build -> conductor/web/dist
+```
+
+The CI `frontend` job runs this and fails if the committed `dist/` is stale.
+
 ## Observability
 
 The worker serves Prometheus metrics at `/metrics` and a JSON health check

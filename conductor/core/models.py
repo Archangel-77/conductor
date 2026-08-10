@@ -31,6 +31,7 @@ class TaskStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     RETRYING = "retrying"
+    CANCELLED = "cancelled"
 
     def __str__(self) -> str:
         return self.value
@@ -336,6 +337,12 @@ class DLQTask:
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
     """The retry policy that was applied."""
 
+    route: str = "default"
+    """Route the task was submitted to (preserved across DLQ retries)."""
+
+    priority: int = 0
+    """Priority the task was submitted with (preserved across DLQ retries)."""
+
     moved_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     """When the task was moved to the DLQ."""
 
@@ -363,6 +370,69 @@ class DLQTask:
         payload = data.copy()
         payload["retry_policy"] = RetryPolicy.from_dict(payload.get("retry_policy", {}))
         for field_name in ("moved_at", "discarded_at"):
+            val = payload.get(field_name)
+            if isinstance(val, str):
+                payload[field_name] = datetime.fromisoformat(val)
+        return cls(**payload)
+
+
+@dataclass(frozen=True)
+class RecurringTask:
+    """A cron-driven definition that periodically creates task instances.
+
+    Stored in the ``conductor_recurring_tasks`` table.  The scheduler polls
+    definitions whose ``next_run_at`` is due, creates a ``Task`` instance,
+    and advances ``next_run_at`` to the next cron fire time (UTC).
+    """
+
+    id: str
+    """Unique identifier for the recurring definition."""
+
+    task_type: str
+    """Logical type of the task instances to create."""
+
+    payload: dict[str, Any]
+    """Payload copied into every generated task instance."""
+
+    cron_expression: str
+    """Standard 5-field cron expression evaluated in UTC."""
+
+    route: str = "default"
+    """Route the generated tasks are submitted to."""
+
+    priority: int = 0
+    """Priority of the generated tasks (higher runs first)."""
+
+    retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
+    """Retry policy applied to generated task instances."""
+
+    enabled: bool = True
+    """Whether the scheduler should generate task instances."""
+
+    next_run_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    """When the next instance should be created (UTC)."""
+
+    last_run_at: Optional[datetime] = None
+    """When the most recent instance was created (UTC)."""
+
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    """When the definition was created."""
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a JSON-friendly dictionary."""
+        result: dict[str, Any] = asdict(self)
+        result["retry_policy"] = self.retry_policy.to_dict()
+        for field_name in ("next_run_at", "last_run_at", "created_at"):
+            val = getattr(self, field_name)
+            result[field_name] = val.isoformat() if val else None
+        return result
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> RecurringTask:
+        """Deserialize from a dictionary."""
+        payload = data.copy()
+        payload["retry_policy"] = RetryPolicy.from_dict(payload.get("retry_policy", {}))
+        for field_name in ("next_run_at", "last_run_at", "created_at"):
             val = payload.get(field_name)
             if isinstance(val, str):
                 payload[field_name] = datetime.fromisoformat(val)

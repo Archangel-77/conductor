@@ -37,6 +37,29 @@ jobs:
       - name: Validate deployment artifacts
         run: python scripts/validate_deploy.py
 
+  frontend:
+    name: Frontend (npm ci && npm run build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: conductor/web/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: conductor/web
+
+      - name: Build frontend
+        run: npm run build
+        working-directory: conductor/web
+
+      - name: Verify committed dist is fresh
+        run: git diff --exit-code -- conductor/web/dist
+
   test:
     name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest

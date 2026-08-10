@@ -24,7 +24,7 @@ pytestmark = pytest.mark.integration
 class TestSchemaConstants:
 
     def test_schema_version(self) -> None:
-        assert SCHEMA_VERSION == 1
+        assert SCHEMA_VERSION == 4
 
     def test_version_table_sql(self) -> None:
         assert "conductor_version" in CREATE_VERSION_TABLE
@@ -59,10 +59,10 @@ class TestTableCreation:
             assert row is not None, f"Table '{table}' not found"
 
     async def test_version_tracked(self, db_pool: Any) -> None:
-        """The conductor_version table should record version 1."""
-        row = await db_pool.fetchrow("SELECT version FROM conductor_version")
+        """The conductor_version table should record the latest version (4)."""
+        row = await db_pool.fetchrow("SELECT MAX(version) AS version FROM conductor_version")
         assert row is not None
-        assert row["version"] == 1
+        assert row["version"] == 4
 
 
 # ===================================================================
@@ -83,6 +83,16 @@ class TestConstraints:
                 "test",
                 "invalid_status",
             )
+
+    async def test_cancelled_status_allowed(self, db_pool: Any) -> None:
+        """The ``cancelled`` status should be accepted by the CHECK."""
+        result = await db_pool.execute(
+            "INSERT INTO conductor_tasks (task_id, task_type, status) " "VALUES ($1, $2, $3)",
+            "cancelled-status-task",
+            "test",
+            "cancelled",
+        )
+        assert "INSERT" in result
 
     async def test_task_priority_range(self, db_pool: Any) -> None:
         """Priority outside the allowed range should fail."""
@@ -139,6 +149,9 @@ class TestIndexes:
     async def test_recurring_next_run_index(self, db_pool: Any) -> None:
         assert await self._index_exists(db_pool, "idx_recurring_next_run")
 
+    async def test_recurring_polling_index(self, db_pool: Any) -> None:
+        assert await self._index_exists(db_pool, "idx_recurring_polling")
+
 
 # ===================================================================
 # Idempotent migrations
@@ -151,10 +164,27 @@ class TestIdempotentMigrations:
         """Running ensure_schema twice should not raise."""
         await schema_manager.ensure_schema()  # second run
 
-    async def test_version_not_duplicated(self, db_pool: Any) -> None:
-        """Version row should not be duplicated after re-migration."""
+    async def test_versions_recorded_once(self, db_pool: Any) -> None:
+        """Each migration step version should be recorded exactly once."""
         rows = await db_pool.fetch("SELECT version FROM conductor_version")
-        assert len(rows) == 1
+        versions = [r["version"] for r in rows]
+        # No duplicate version rows (unique constraint holds)
+        assert len(versions) == len(set(versions))
+        # All migration steps are recorded
+        assert 1 in versions
+        assert 2 in versions
+        assert 3 in versions
+        assert 4 in versions
+
+    async def test_dead_letter_route_priority_columns(self, db_pool: Any) -> None:
+        """The dead-letter table should expose route/priority columns."""
+        rows = await db_pool.fetch(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'conductor_dead_letter' "
+            "AND column_name IN ('route', 'priority')"
+        )
+        cols = {r["column_name"] for r in rows}
+        assert {"route", "priority"} <= cols
 
 
 # ===================================================================
@@ -176,3 +206,63 @@ class TestRollback:
 
         # Re-create for subsequent tests
         await schema_manager.ensure_schema()
+
+
+class TestMigrationUpgrade:
+
+    async def test_migrates_older_db_to_latest(self, schema_manager: Any, db_pool: Any) -> None:
+        """An older (v2) database is upgraded to the latest version by ensure_schema()."""
+        # Simulate a v2 database: drop the v3-only index and the v3 version row
+        await db_pool.execute("DROP INDEX IF EXISTS idx_recurring_polling")
+        await db_pool.execute("DELETE FROM conductor_version WHERE version >= 3")
+
+        current = await schema_manager.get_current_version()
+        assert current == 2
+
+        # Upgrade back to the latest version
+        await schema_manager.ensure_schema()
+
+        current = await schema_manager.get_current_version()
+        assert current == 4
+
+        # Index is back
+        row = await db_pool.fetchrow(
+            "SELECT indexname FROM pg_indexes WHERE indexname = 'idx_recurring_polling'"
+        )
+        assert row is not None
+
+        # No duplicate version rows
+        versions = [
+            r["version"] for r in await db_pool.fetch("SELECT version FROM conductor_version")
+        ]
+        assert len(versions) == len(set(versions))
+
+    async def test_migrates_v3_to_v4(self, schema_manager: Any, db_pool: Any) -> None:
+        """A v3 database gains the ``cancelled`` status via the v3→v4 migration."""
+        # Simulate a v3 database: re-add the v3 CHECK (no ``cancelled``)
+        # and drop the v4 version row.
+        await db_pool.execute("ALTER TABLE conductor_tasks DROP CONSTRAINT chk_task_status")
+        await db_pool.execute(
+            "ALTER TABLE conductor_tasks ADD CONSTRAINT chk_task_status CHECK ("
+            "status IN ('pending', 'processing', 'completed', 'failed', 'retrying')"
+            ")"
+        )
+        await db_pool.execute("DELETE FROM conductor_version WHERE version = 4")
+
+        current = await schema_manager.get_current_version()
+        assert current == 3
+
+        # Upgrading should re-add ``cancelled`` to the constraint
+        await schema_manager.ensure_schema()
+
+        current = await schema_manager.get_current_version()
+        assert current == 4
+
+        # The new status is accepted by the migrated constraint
+        result = await db_pool.execute(
+            "INSERT INTO conductor_tasks (task_id, task_type, status) " "VALUES ($1, $2, $3)",
+            "v3-migrated-cancelled",
+            "test",
+            "cancelled",
+        )
+        assert "INSERT" in result

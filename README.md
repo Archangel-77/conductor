@@ -286,6 +286,107 @@ To shut down programmatically, call ``await worker.shutdown()``.
 All in-flight tasks complete before the worker disconnects.
 ```
 
+### 6. Task Routing & Priority Queues
+
+Submit tasks to named ``route``\ s and run dedicated worker pools, or
+prioritize work so higher-priority tasks run first.
+
+```python
+# Route + priority
+await queue.submit(
+    "send_sms",
+    {"to": "+1234567890"},
+    route="critical",  # only workers subscribing to "critical" poll this
+    priority=50,        # higher runs first (range -100..100)
+)
+
+# Route-specific worker
+worker = Worker(database_url="...", routes=["critical"])
+# Or poll everything:
+worker = Worker(database_url="...", routes=None)  # None = all routes
+```
+
+Priority is honored by the polling query (``ORDER BY priority DESC,
+created_at ASC``), so higher-priority tasks are dispatched first even when
+submitted later.  Routed/prioritized tasks keep their ``route``/``priority``
+when recovered from the dead-letter queue.
+
+### 7. Scheduled & Recurring Tasks
+
+Defer one-off work with ``scheduled_for``, or register cron-driven recurring
+definitions that the ``RecurringScheduler`` fires automatically.
+
+```python
+# One-off: run at most 1 hour from now
+await queue.submit("cleanup", {"keep": 30},
+                  scheduled_for=datetime.now(timezone.utc) + timedelta(hours=1))
+
+# Recurring: create one task instance per cron fire (UTC)
+rid = await queue.schedule_recurring("cleanup", {"keep": 30}, "0 2 * * *")
+
+# Run the scheduler (standalone, or embed in a worker)
+from conductor import RecurringScheduler
+async with RecurringScheduler(database_url="...") as sched:
+    await sched.run()
+```
+
+Definitions are claimed with ``FOR UPDATE SKIP LOCKED`` (safe for multiple
+schedulers); ``next_run_at`` advances to the next cron time (UTC, skipping
+missed runs).  Manage them via ``list_recurring_tasks()``,
+``pause_recurring()``, ``resume_recurring()``, and ``delete_recurring_task()``.
+
+### 8. gRPC API (polyglot workers)
+
+A Worker can embed an async gRPC server so non-Python clients can execute
+tasks and inspect worker state.
+
+```python
+worker = Worker(database_url="...", grpc_enabled=True, grpc_port=50051)
+```
+
+```proto
+service ConductorWorker {
+  rpc ProcessTask(TaskRequest) returns (TaskResponse);
+  rpc RegisterHandler(RegisterRequest) returns (RegisterResponse);
+  rpc GetWorkerStatus(StatusRequest) returns (WorkerStatus);
+}
+```
+
+- ``ProcessTask`` executes a task through the worker's registered handler
+  (``persist=true`` also records the outcome in ``conductor_tasks``).
+- ``RegisterHandler`` declares a handler for a ``task_type`` (idempotent).
+- ``GetWorkerStatus`` returns worker health and statistics.
+
+Generated stubs are committed (``conductor/grpc/``) so no ``protoc`` is needed
+at install; regenerate with ``python scripts/generate_grpc.py``.  See
+``examples/8_grpc_client.py`` (Python) and ``examples/grpc/`` (Go/Rust/Node
+reference clients).
+
+### 9. Web Dashboard
+
+Monitor tasks, workers, metrics, and the DLQ through a built-in web UI — a
+**FastAPI** backend (`conductor/api/`) plus a **React + Vite** frontend
+(`conductor/web/`) with five screens:
+
+1. **Tasks** — overview with status filter, free-text search, and pagination
+2. **Task details** — payload, retry history, result, and error; cancel pending
+   or retrying tasks
+3. **Workers** — all registered workers with heartbeat, uptime, and counts
+4. **Metrics** — Prometheus counters/gauges as hand-rolled SVG charts
+5. **Dead Letter** — list DLQ tasks, retry or discard them
+
+```bash
+conductor api --host 0.0.0.0 --port 8080     # standalone dashboard server
+```
+
+Or embed it in a worker: `Worker(api_enabled=True)` / `CONDUCTOR_API_ENABLED`.
+Optional API-key auth (`CONDUCTOR_API_KEY` → `X-API-Key` header; unset = open).
+Tasks can be cancelled from the UI or the API (`POST /api/tasks/{id}/cancel`),
+which uses the new `CANCELLED` task status (schema v4). The built frontend is
+**committed** (`conductor/web/dist`) and ships in the wheel — no Node.js needed
+at install; rebuild with `npm run build` (see `scripts/build_frontend.sh`). See
+``examples/9_web_dashboard.py``.
+
 ---
 
 ## Installation
@@ -554,9 +655,9 @@ async def cleanup_expired_sessions(payload: dict) -> dict:
 #     )
 ```
 
-> **Tip:** For recurring/scheduled tasks, use an external cron job
-> or systemd timer to submit tasks on a schedule. Native cron
-> support is planned for v0.2.
+> **Tip:** For one-off future runs use ``scheduled_for``; for repeating
+> (cron) runs use ``schedule_recurring()`` with the ``RecurringScheduler``
+> (or ``Worker(enable_scheduler=True)``) instead of an external cron job.
 
 ### Example 4: Error Handling & Idempotency
 
@@ -838,13 +939,14 @@ task_id = await queue.submit(
 )
 ```
 
-#### `list_pending_tasks(limit=10, offset=0)`
+#### `list_pending_tasks(limit=10, offset=0, route=None)`
 
 Get pending (not yet executed) tasks.
 
 **Parameters**:
 - `limit` (int): Max results
 - `offset` (int): Pagination offset
+- `route` (str | None): If set, only return tasks on this route
 
 **Returns**: `List[Task]`
 

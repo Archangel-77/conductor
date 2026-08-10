@@ -38,9 +38,11 @@ from conductor.core.models import (
     get_hostname,
     utc_now,
 )
+from conductor.core.queue import _task_to_db_dict
 from conductor.db.connection import DatabasePool
 from conductor.db.queries import QueryBuilder
 from conductor.db.schema import SchemaManager
+from conductor.exceptions import WorkerError
 from conductor.observability.metrics import (
     inc_tasks_completed,
     inc_tasks_failed,
@@ -88,6 +90,13 @@ class Worker:
         metrics_port: int = 8000,
         metrics_enabled: bool = True,
         health_enabled: bool = True,
+        enable_scheduler: bool = False,
+        grpc_port: int = 50051,
+        grpc_enabled: bool = False,
+        grpc_max_message_size: Optional[int] = None,
+        api_port: int = 8080,
+        api_enabled: bool = False,
+        api_key: Optional[str] = None,
     ) -> None:
         # Worker identity
         hostname = get_hostname()
@@ -99,12 +108,21 @@ class Worker:
         # Configuration
         self._concurrency = concurrency
         self._poll_interval = poll_interval
-        self._routes = routes or ["default"]
+        # ``None`` means the worker polls *all* routes (no route filter).
+        self._routes: Optional[list[str]] = list(routes) if routes else None
         self._heartbeat_interval = heartbeat_interval
         self._graceful_shutdown_timeout = graceful_shutdown_timeout
         self._metrics_port = metrics_port
         self._metrics_enabled = metrics_enabled
         self._health_enabled = health_enabled
+        self._enable_scheduler = enable_scheduler
+        self._grpc_port = grpc_port
+        self._grpc_enabled = grpc_enabled
+        self._grpc_max_message_size = grpc_max_message_size
+        self._api_port = api_port
+        self._api_enabled = api_enabled
+        self._api_key = api_key
+        self._log_level = log_level
 
         # Apply log level
         logging.getLogger("conductor").setLevel(log_level.upper())
@@ -131,6 +149,10 @@ class Worker:
         self._shutdown_requested = False
         self._in_flight_tasks: set[asyncio.Task[Any]] = set()
         self._heartbeat_task: Optional[asyncio.Task[None]] = None
+        self._recurring_task: Optional[asyncio.Task[None]] = None
+        self._recurring_scheduler: Optional[Any] = None
+        self._grpc_server: Optional[Any] = None
+        self._dashboard_server: Optional[Any] = None
 
         # Statistics
         self._started_at: Optional[datetime] = None
@@ -295,6 +317,18 @@ class Worker:
             name=f"worker-heartbeat-{self._worker_id}",
         )
 
+        # Start the recurring scheduler background task (optional)
+        if self._enable_scheduler:
+            from conductor.recurring.scheduler import RecurringScheduler
+
+            self._recurring_scheduler = RecurringScheduler(
+                database_url=self._database_url,
+            )
+            self._recurring_task = asyncio.create_task(
+                self._recurring_scheduler.run(),
+                name=f"recurring-scheduler-{self._worker_id}",
+            )
+
         # Start metrics/health HTTP server
         if self._metrics_enabled or self._health_enabled:
             health_checker = HealthChecker(self._pool)
@@ -313,6 +347,48 @@ class Worker:
                     exc,
                 )
                 self._metrics_exporter = None
+
+        # Start the gRPC server (optional)
+        if self._grpc_enabled:
+            from conductor.grpc.server import GrpcWorkerServer
+
+            self._grpc_server = GrpcWorkerServer(
+                self,
+                port=self._grpc_port,
+                max_message_size=self._grpc_max_message_size,
+            )
+            try:
+                await self._grpc_server.start()
+            except OSError as exc:
+                logger.warning(
+                    "Failed to start gRPC server on port %d: %s. "
+                    "Worker will continue without it.",
+                    self._grpc_port,
+                    exc,
+                )
+                self._grpc_server = None
+
+        # Start the dashboard server (optional)
+        if self._api_enabled:
+            from conductor.api.server import DashboardServer
+
+            self._dashboard_server = DashboardServer(
+                self._pool,
+                health_checker=HealthChecker(self._pool),
+                api_key=self._api_key,
+                port=self._api_port,
+                log_level=self._log_level,
+            )
+            try:
+                await self._dashboard_server.start()
+            except OSError as exc:
+                logger.warning(
+                    "Failed to start dashboard server on port %d: %s. "
+                    "Worker will continue without it.",
+                    self._api_port,
+                    exc,
+                )
+                self._dashboard_server = None
 
         # Set up signal handlers for graceful shutdown
         loop = asyncio.get_running_loop()
@@ -382,6 +458,86 @@ class Worker:
                     self._semaphore.release()
 
     # ------------------------------------------------------------------
+    # Public handler / execution helpers
+    # ------------------------------------------------------------------
+
+    def get_handler(self, task_type: str) -> Optional[HandlerFunc]:
+        """Return the registered handler for *task_type* (or ``None``).
+
+        Args:
+            task_type: The task type whose handler to fetch.
+        """
+        return self._handlers.get(task_type)
+
+    def has_handler(self, task_type: str) -> bool:
+        """Return whether a handler is registered for *task_type*."""
+        return task_type in self._handlers
+
+    def register_remote_handler(self, task_type: str) -> bool:
+        """Register a remote (non-executable) handler for *task_type*.
+
+        Idempotent — returns ``True`` if newly registered.  The marker handler
+        raises a clear error if invoked in-process (e.g. via gRPC
+        ``ProcessTask``).
+
+        Args:
+            task_type: The task type to declare as handled remotely.
+        """
+        if task_type in self._handlers:
+            return False
+
+        async def _remote_handler(_payload: dict[str, Any]) -> dict[str, Any]:
+            raise WorkerError(
+                f"task_type '{task_type}' is registered remotely and "
+                "cannot be executed in-process"
+            )
+
+        self._handlers[task_type] = _remote_handler
+        return True
+
+    async def persist_and_execute(
+        self,
+        *,
+        task_id: str,
+        task_type: str,
+        payload: dict[str, Any],
+    ) -> Optional[Task]:
+        """Insert a task row (if needed) and execute it through the lifecycle.
+
+        Runs the normal ``_execute_task`` path (status transitions, metrics,
+        retry/DLQ handling) and returns the resulting
+        :class:`~conductor.core.models.Task`, or ``None`` if the row cannot
+        be found afterwards.
+
+        Args:
+            task_id: The task ID (must not collide with an existing row that
+                belongs to a different task).
+            task_type: The task type to execute.
+            payload: The payload to store and pass to the handler.
+        """
+        queries = self._queries
+        assert queries is not None
+        now = utc_now()
+
+        existing = await queries.select_task(task_id)
+        if existing is None:
+            task = Task(
+                task_id=task_id,
+                task_type=task_type,
+                payload=payload,
+                status=TaskStatus.PENDING,
+                created_at=now,
+            )
+            await queries.insert_task(_task_to_db_dict(task))
+        else:
+            task = Task.from_dict(existing)
+
+        await self._execute_task(task)
+
+        row = await queries.select_task(task_id)
+        return Task.from_dict(row) if row else None
+
+    # ------------------------------------------------------------------
     # Task polling
     # ------------------------------------------------------------------
 
@@ -412,11 +568,20 @@ class Worker:
     async def _poll_tasks(self) -> list[Task]:
         """Query the database for pending tasks eligible for processing.
 
+        If the worker polls *all* routes (``routes=None``), a single
+        unfiltered query is used and the database ordering (``priority DESC,
+        created_at ASC``) is preserved.  Otherwise each configured route is
+        polled and the combined batch is re-sorted by priority.
+
         Returns:
             A list of ``Task`` objects (may be empty).
         """
         queries = self._queries
         assert queries is not None
+
+        if self._routes is None:
+            rows = await queries.select_pending_tasks(limit=10, offset=0)
+            return [Task.from_dict(row) for row in rows]
 
         all_tasks: list[Task] = []
         for route in self._routes:
@@ -598,6 +763,8 @@ class Worker:
                     "error_message": error_message,
                     "attempts": new_attempt,
                     "retry_policy": task.retry_policy.to_dict(),
+                    "route": task.route,
+                    "priority": task.priority,
                     "moved_at": now,
                 }
             )
@@ -754,6 +921,24 @@ class Worker:
             except asyncio.CancelledError:
                 pass
 
+        # Stop the recurring scheduler background task (if enabled)
+        if self._recurring_task is not None and not self._recurring_task.done():
+            self._recurring_task.cancel()
+            try:
+                await self._recurring_task
+            except asyncio.CancelledError:
+                pass
+
+        # Stop the gRPC server (if enabled)
+        if self._grpc_server is not None:
+            await self._grpc_server.stop()
+            self._grpc_server = None
+
+        # Stop the dashboard server (if enabled)
+        if self._dashboard_server is not None:
+            await self._dashboard_server.stop()
+            self._dashboard_server = None
+
         # Wait for in-flight tasks to complete (with timeout)
         if self._in_flight_tasks:
             logger.info(
@@ -868,9 +1053,15 @@ class Worker:
             - ``current_task_id`` — task currently being processed (or ``None``)
             - ``concurrency`` — maximum concurrent tasks
             - ``in_flight`` — number of tasks currently being executed
-            - ``routes`` — routes this worker polls
+            - ``routes`` — routes this worker polls (``None`` = all routes)
             - ``registered_handlers`` — list of registered task types
             - ``connected`` — whether the database is connected
+            - ``grpc_enabled`` — whether a gRPC server is configured
+            - ``grpc_port`` — the configured gRPC port
+            - ``grpc_serving`` — whether the gRPC server is currently up
+            - ``api_enabled`` — whether a dashboard server is configured
+            - ``api_port`` — the configured dashboard port
+            - ``api_serving`` — whether the dashboard server is up
         """
         uptime = 0.0
         if self._started_at is not None:
@@ -892,9 +1083,21 @@ class Worker:
             "current_task_id": self._current_task_id,
             "concurrency": self._concurrency,
             "in_flight": len(self._in_flight_tasks),
-            "routes": list(self._routes),
+            "routes": list(self._routes) if self._routes else None,
             "registered_handlers": list(self._handlers.keys()),
             "connected": self.is_connected,
+            "grpc_enabled": self._grpc_enabled,
+            "grpc_port": self._grpc_port,
+            "grpc_serving": (
+                self._grpc_server.is_serving if self._grpc_server is not None else False
+            ),
+            "api_enabled": self._api_enabled,
+            "api_port": self._api_port,
+            "api_serving": (
+                self._dashboard_server.get_status()["serving"]
+                if self._dashboard_server is not None
+                else False
+            ),
         }
 
 

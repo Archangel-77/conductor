@@ -25,9 +25,10 @@ Checklist:
    async def handler(payload: dict) -> dict:
        return {"status": "done"}
    ```
-3. **Routes match?** A worker polls only its `routes` (`ROUTES` env var,
-   default `["default"]`). A task submitted with a different `route` won't be
-   picked up.
+3. **Routes match?** A worker polls only the routes it subscribes to — the
+   CLI's `ROUTES` env var (default `["default"]`) or programmatic
+   `Worker(routes=[...])`. A task submitted with a different `route` won't be
+   picked up. A programmatic `Worker(routes=None)` polls **all** routes.
 4. **Is `scheduled_for` in the past?** Tasks scheduled in the future are not
    polled until then.
 5. **Check the worker logs** (see Logging below) for poll/execute messages.

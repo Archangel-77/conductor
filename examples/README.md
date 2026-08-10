@@ -1,6 +1,6 @@
 # Conductor Examples
 
-Five runnable examples that demonstrate real-world Conductor patterns.
+Eight runnable examples that demonstrate real-world Conductor patterns.
 Each script is self-contained, uses the public API, and exits cleanly.
 
 | # | File | Demonstrates |
@@ -10,6 +10,13 @@ Each script is self-contained, uses the public API, and exits cleanly.
 | 3 | `3_data_processing.py` | multi-step pipeline + manual task chaining |
 | 4 | `4_scheduled_cleanup.py` | scheduled tasks (`scheduled_for`) + cron pattern |
 | 5 | `5_error_handling.py` | custom exceptions, idempotency, DLQ recovery |
+| 6 | `6_routing_priority.py` | task routing (`route`) + priority queues |
+| 7 | `7_recurring_tasks.py` | recurring cron tasks (`schedule_recurring` + scheduler) |
+| 8 | `8_grpc_client.py` | gRPC API (`ProcessTask`/`RegisterHandler`/`GetWorkerStatus`) |
+| 9 | `9_web_dashboard.py` | web dashboard (FastAPI API + built React SPA, cancel task) |
+
+Polyglot **reference client stubs** (Go/Rust/Node) for the gRPC service live in
+[`grpc/`](grpc/README.md).
 
 ## Prerequisites
 
@@ -62,8 +69,8 @@ v0.2.
 
 A task submitted with a future `scheduled_for` is not polled before its
 time; the script shows it staying `pending`, then being executed once due.
-For recurring work, trigger submissions from cron or a systemd timer
-(native cron is planned for v0.2):
+For repeating runs, prefer the native cron scheduler (`examples/7`); an
+external crontab still works as a manual alternative:
 
 ```cron
 # crontab — submit the cleanup task daily at 2 AM
@@ -78,6 +85,27 @@ For recurring work, trigger submissions from cron or a systemd timer
   (no double charge)
 - A task with `max_retries=0` fails immediately into the dead-letter
   queue, then is recovered with `DeadLetterQueue.retry_task()`
+
+### 6. Routing & priority queues
+
+Two v0.2 features in one script:
+
+- **Routing** — tasks are submitted to named routes (`route="critical"`,
+  `route="batch"`).  A worker polls only the routes it subscribes to
+  (`routes=["critical"]`), so `worker-critical` never sees `batch` tasks.
+  Pass `routes=None` to a worker to poll *all* routes.
+- **Priority** — tasks with a higher `priority` (range -100..100) are
+  executed before lower-priority ones, even when submitted later.  The
+  script submits ranks out of order and prints the execution order.
+
+### 7. Recurring cron tasks
+
+Registers a cron definition with `queue.schedule_recurring(task_type, payload,
+cron_expression)`, then runs a `RecurringScheduler` once to fire a due
+instance and a `Worker` to execute it.  The definition's `next_run_at`
+advances to the next cron fire (UTC).  In production, run the scheduler
+continuously (`scheduler.run()`) — optionally embedded in a worker with
+`Worker(enable_scheduler=True)`.
 
 ## Notes
 

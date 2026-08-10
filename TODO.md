@@ -832,115 +832,155 @@
 
 ## Phase 2: Advanced Features (v0.2)
 
-### Sprint 1: Task Routing & Priority Queues (Week 1-2)
+### Sprint 1: Task Routing & Priority Queues (Week 1-2) 🔄
 
 #### Task Routing
-- [ ] Add `route` column to `conductor_tasks` table
-- [ ] Update task submission to accept `route` parameter
-- [ ] Update polling query to filter by route
-- [ ] Update Worker to accept `routes` parameter
-- [ ] Update worker configuration (ROUTES env var)
-- [ ] Write tests for routing
-- [ ] Update documentation with routing examples
+- [x] Add `route` column to `conductor_tasks` table (pre-scaffolded in v0.1 schema + index)
+- [x] Update task submission to accept `route` parameter (`submit()` / `submit_many()`)
+- [x] Update polling query to filter by route (`select_pending_tasks(route=...)`)
+- [x] Update Worker to accept `routes` parameter
+- [x] Update worker configuration (ROUTES env var)
+- [x] Write tests for routing (per-route, multi-route, all-routes, route filter)
+- [x] Update documentation with routing examples (`examples/6_routing_priority.py` + docs)
+
+**Decisions (Sprint 1):**
+- `Worker(routes=None)` (programmatic default) polls **all** routes — no route filter.
+  The CLI / `ROUTES` env default stays `["default"]` (intentional asymmetry, documented).
+- Routed tasks keep their `route` when retried from the DLQ (schema v2 stores
+  `route`/`priority` on `conductor_dead_letter`).
+- `submit()`/`submit_many()` validate `route` (non-empty string) up-front → `ValueError`.
 
 #### Priority Queues
-- [ ] Add `priority` column to `conductor_tasks` table
-- [ ] Update task submission to accept `priority` parameter
-- [ ] Update polling query to order by priority
-- [ ] Set default priority (0)
-- [ ] Document priority range (-100 to 100)
-- [ ] Write tests for priority ordering
-- [ ] Add priority to examples
+- [x] Add `priority` column to `conductor_tasks` table (pre-scaffolded in v0.1 schema + CHECK + index)
+- [x] Update task submission to accept `priority` parameter (`submit()` / `submit_many()`)
+- [x] Update polling query to order by priority (`priority DESC, created_at ASC`)
+- [x] Set default priority (0)
+- [x] Document priority range (-100 to 100) in `docs/configuration.md` + `README.md`
+- [x] Write tests for priority ordering (worker execution order + queue listing)
+- [x] Add priority to examples (`examples/6_routing_priority.py`)
+
+**Decisions (Sprint 1):**
+- `priority` is validated up-front in `submit()`/`submit_many()` (int, -100..100) → `ValueError`,
+  matching the DB CHECK constraint.
+- Prioritized tasks keep their `priority` when retried from the DLQ (schema v2).
 
 ---
 
-### Sprint 2: Scheduled & Recurring Tasks (Week 2-4)
+### Sprint 2: Scheduled & Recurring Tasks (Week 2-4) ✅
 
 #### Scheduled Tasks
-- [ ] Add `scheduled_for` column to `conductor_tasks` table (already in schema)
-- [ ] Update task submission to accept `scheduled_for` parameter
-- [ ] Update polling query to filter `scheduled_for <= NOW()`
-- [ ] Write tests for scheduled execution
-- [ ] Update documentation with scheduled task examples
+- [x] Add `scheduled_for` column to `conductor_tasks` table (already in schema)
+- [x] Update task submission to accept `scheduled_for` parameter (`submit()` + `submit_many()`)
+- [x] Update polling query to filter `scheduled_for <= NOW()`
+- [x] Write tests for scheduled execution
+- [x] Update documentation with scheduled task examples
 
 #### Recurring Tasks
-- [ ] Create `conductor_recurring_tasks` table (already in schema)
-- [ ] Create recurring task scheduler daemon
-  - [ ] Query tasks with `next_run_at <= NOW()`
-  - [ ] Create task instance for each recurring definition
-  - [ ] Calculate next_run_at using cron expression
-  - [ ] Run as background process
-- [ ] Implement `queue.schedule_recurring(task_type, cron_expression, payload)`
-- [ ] Use croniter library for cron parsing
-- [ ] Write tests for recurring task execution
-- [ ] Update documentation with recurring examples
+- [x] Create `conductor_recurring_tasks` table (already in schema; composite index in v3)
+- [x] Create recurring task scheduler daemon (`RecurringScheduler` in `conductor/recurring/`)
+  - [x] Query tasks with `next_run_at <= NOW()` (enabled only, `FOR UPDATE SKIP LOCKED`)
+  - [x] Create task instance for each recurring definition (route/priority/retry_policy preserved)
+  - [x] Calculate next_run_at using cron expression (croniter, UTC)
+  - [x] Run as background process (standalone `run()` loop; optional `Worker(enable_scheduler=True)`)
+- [x] Implement `queue.schedule_recurring(task_type, cron_expression, payload)`
+  - [x] Plus management API: `list_recurring_tasks`, `get_recurring_task`, `pause_recurring`, `resume_recurring`, `delete_recurring_task`
+- [x] Use croniter library for cron parsing (`croniter>=1.4` dependency)
+- [x] Write tests for recurring task execution (unit cron, integration `test_recurring.py`, e2e recurring workflow)
+- [x] Update documentation with recurring examples (`examples/7_recurring_tasks.py` + docs)
+
+**Decisions (Sprint 2):**
+- Cron evaluated in **UTC**; missed occurrences are **skipped** (no backfill).
+- `RecurringScheduler` is standalone (`conductor/recurring/scheduler.py`) + optional in-process via
+  `Worker(enable_scheduler=True)` / `CONDUCTOR_ENABLE_SCHEDULER`. Multiple schedulers are safe:
+  due definitions are claimed with `FOR UPDATE SKIP LOCKED` inside one transaction.
+- Schema is at **v3** (`idx_recurring_polling (enabled, next_run_at)`); incremental migrations
+  v0→v1→v2→v3, one `conductor_version` row per step.
 
 ---
 
-### Sprint 3: gRPC API (Week 4-5)
+### Sprint 3: gRPC API (Week 4-5) ✅
 
 #### Protocol Buffers
-- [ ] Create `proto/conductor.proto`
-  - [ ] Define ConductorWorker service
-  - [ ] Define TaskRequest message
-  - [ ] Define TaskResponse message
-  - [ ] Compile proto files
+- [x] Create `proto/conductor.proto`
+  - [x] Define ConductorWorker service (`ProcessTask`, `RegisterHandler`, `GetWorkerStatus`)
+  - [x] Define TaskRequest message (incl. `persist` flag)
+  - [x] Define TaskResponse message
+  - [x] Compile proto files (committed stubs in `conductor/grpc/` + `scripts/generate_grpc.py`)
 
 #### gRPC Server
-- [ ] Add gRPC server to Worker
-- [ ] Implement ProcessTask RPC
-- [ ] Implement RegisterHandler RPC
-- [ ] Handle task execution via gRPC
-- [ ] Configuration for gRPC port
+- [x] Add gRPC server to Worker (`Worker(grpc_enabled=True)` / `GRPC_ENABLED`; `grpc.aio` server)
+- [x] Implement ProcessTask RPC (pure execution; `persist=true` records outcome in `conductor_tasks`)
+- [x] Implement RegisterHandler RPC (idempotent runtime handler registration)
+- [x] Handle task execution via gRPC (`_call_handler` dispatch; gRPC status-code mapping)
+- [x] Configuration for gRPC port (`GRPC_PORT`, `GRPC_MAX_MESSAGE_SIZE`; `WorkerSettings`)
 
 #### Tests & Documentation
-- [ ] Write gRPC integration tests
-- [ ] Create examples in other languages (Go, Rust, Node.js - stubs)
-- [ ] Document gRPC API
+- [x] Write gRPC integration tests (unit servicer + live `grpc.aio` channel)
+- [x] Create examples in other languages (Go, Rust, Node.js - reference stubs)
+- [x] Document gRPC API (`docs/api-reference.md` section + `examples/grpc/README.md`)
+
+**Decisions (Sprint 3):**
+- gRPC server is **embedded in the Worker**; polyglot clients call it. `ProcessTask` is **pure
+  execution** by default; `persist=true` opts into the full lifecycle (status/metrics/retry/DLQ).
+- Generated stubs are committed (no `protoc` at install); hand-maintained `.pyi` stubs type them;
+  `types-protobuf`/`grpc-stubs`/`grpcio-tools` are dev deps. `grpcio>=1.60` is runtime.
+- `GetWorkerStatus` added beyond the original RPC list (maps `Worker.get_status()`).
 
 ---
 
-### Sprint 4: Web Dashboard (Week 5-8)
+### Sprint 4: Web Dashboard (Week 5-8) ✅
 
 #### Backend API (FastAPI)
-- [ ] Create `conductor/api/` module
-- [ ] GET /api/tasks (list all tasks)
-- [ ] GET /api/tasks/{id} (get task details)
-- [ ] GET /api/workers (list active workers)
-- [ ] GET /api/metrics (expose Prometheus metrics as JSON)
-- [ ] GET /api/dlq (list DLQ tasks)
-- [ ] POST /api/dlq/{id}/retry (retry DLQ task)
-- [ ] POST /api/tasks/{id}/cancel (cancel pending task)
+- [x] Create `conductor/api/` module
+- [x] GET /api/tasks (list all tasks, filters + pagination)
+- [x] GET /api/tasks/{id} (get task details + retries)
+- [x] POST /api/tasks/{id}/cancel (cancel pending/retrying task; schema v4 `CANCELLED`)
+- [x] GET /api/workers (list all workers)
+- [x] GET /api/metrics (expose Prometheus metrics as JSON)
+- [x] GET /api/dlq (list DLQ tasks)
+- [x] POST /api/dlq/{id}/retry (retry DLQ task)
+- [x] POST /api/dlq/{id}/discard (discard DLQ task)
+- [x] GET /api/health (HealthResult JSON)
 
 #### Frontend (React + Vite)
-- [ ] Create `conductor/web/` frontend directory
-- [ ] Tasks overview page
-  - [ ] Filter by status
-  - [ ] Search by task_id or type
-  - [ ] Pagination
-- [ ] Task details page
-  - [ ] Payload display
-  - [ ] Retry history
-  - [ ] Logs
-  - [ ] Result
-- [ ] Workers status page
-  - [ ] List active workers
-  - [ ] Worker uptime
-  - [ ] Tasks processed
-- [ ] Metrics page
-  - [ ] Task throughput graph
-  - [ ] Latency graph
-  - [ ] Error rate graph
-  - [ ] Worker count gauge
-- [ ] DLQ page
-  - [ ] List failed tasks
-  - [ ] Retry failed task
-  - [ ] Discard task
+- [x] Create `conductor/web/` frontend directory
+- [x] Tasks overview page
+  - [x] Filter by status
+  - [x] Search by task_id or type
+  - [x] Pagination
+- [x] Task details page
+  - [x] Payload display
+  - [x] Retry history
+  - [x] Result / error
+  - [x] Cancel action
+- [x] Workers status page
+  - [x] List workers
+  - [x] Worker uptime
+  - [x] Tasks processed
+- [x] Metrics page
+  - [x] Throughput by type (hand-rolled SVG charts)
+  - [x] Failed / retried by type
+  - [x] Pending / workers / DLQ gauges
+- [x] DLQ page
+  - [x] List failed tasks
+  - [x] Retry failed task
+  - [x] Discard task
 
 #### Testing & Deployment
-- [ ] Integration tests for API endpoints
-- [ ] Build and serve frontend
-- [ ] Docker image includes frontend assets
+- [x] Unit tests for API endpoints (`tests/unit/test_api_app.py`, TestClient + fakes)
+- [x] Integration tests for live dashboard (`tests/integration/test_api.py`, port 8767)
+- [x] Schema v4 + cancel tests (unit + integration)
+- [x] Build and serve frontend (committed `dist/`; `scripts/build_frontend.sh`)
+- [x] CI `frontend` job (npm ci && npm run build + freshness check)
+
+**Decisions (Sprint 4):**
+- Backend is **FastAPI + uvicorn**; frontend is **React + Vite** with hand-rolled SVG charts.
+- The built frontend (`conductor/web/dist`) is **committed** and ships in the wheel — no Node.js at
+  install; rebuild with `npm run build` (mirrors the committed-gRPC-stubs precedent).
+- Dashboard reads use **new non-locking queries** (`select_tasks`/`count_tasks`/`select_all_workers`);
+  the locked `select_pending_tasks` is never used for reads.
+- `TaskStatus.CANCELLED` added via schema **v4** (v3→v4 migration rebuilds `chk_task_status`).
+- Optional API key (`CONDUCTOR_API_KEY` → `X-API-Key`; unset = open); WebSocket real-time deferred.
 
 ---
 

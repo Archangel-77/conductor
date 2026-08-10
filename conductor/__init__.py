@@ -13,6 +13,7 @@ from conductor.core.models import (
     ExponentialBackoff,
     FixedBackoff,
     LinearBackoff,
+    RecurringTask,
     RetryPolicy,
     RetryRecord,
     Task,
@@ -36,6 +37,11 @@ from conductor.core.queue import TaskQueue
 from conductor.core.worker import Worker
 
 from conductor.dlq.dead_letter_queue import DeadLetterQueue
+from conductor.recurring.scheduler import RecurringScheduler
+from conductor.grpc.server import GrpcWorkerServer
+
+from conductor.api.server import DashboardServer
+from conductor.api.app import create_app
 
 from conductor.observability.health import HealthChecker, HealthResult, HealthStatus
 
@@ -43,17 +49,22 @@ __all__: list[str] = [
     "BackoffStrategyType",
     "ConductorConnectionError",
     "ConductorException",
+    "create_app",
     "DatabaseError",
     "DatabasePool",
+    "DashboardServer",
     "DLQTask",
     "ExponentialBackoff",
     "FixedBackoff",
+    "GrpcWorkerServer",
     "HealthChecker",
     "HealthResult",
     "HealthStatus",
     "LinearBackoff",
     "PoolConfig",
     "QueryBuilder",
+    "RecurringScheduler",
+    "RecurringTask",
     "RetryPolicy",
     "RetryPolicyError",
     "RetryRecord",

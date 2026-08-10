@@ -100,6 +100,7 @@ async def _cleanup_test_data(task_queue: Any) -> Any:
         await task_queue.execute_raw("DELETE FROM conductor_dead_letter")
         await task_queue.execute_raw("DELETE FROM conductor_tasks")
         await task_queue.execute_raw("DELETE FROM conductor_workers")
+        await task_queue.execute_raw("DELETE FROM conductor_recurring_tasks")
 
 
 # ===================================================================

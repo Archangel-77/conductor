@@ -65,6 +65,7 @@ async def auto_cleanup(dlq: Any) -> Any:
         await dlq._pool.execute("DELETE FROM conductor_dead_letter")
         await dlq._pool.execute("DELETE FROM conductor_tasks")
         await dlq._pool.execute("DELETE FROM conductor_workers")
+        await dlq._pool.execute("DELETE FROM conductor_recurring_tasks")
 
 
 # ===================================================================
@@ -80,6 +81,8 @@ async def _insert_failed_task(
     error_message: str = "test error",
     attempts: int = 1,
     max_retries: int = 0,
+    route: str = "default",
+    priority: int = 0,
 ) -> None:
     """Insert a failed task into both conductor_tasks and conductor_dead_letter."""
     now = utc_now()
@@ -90,8 +93,8 @@ async def _insert_failed_task(
             "task_type": task_type,
             "payload": payload or {},
             "status": "failed",
-            "priority": 0,
-            "route": "default",
+            "priority": priority,
+            "route": route,
             "attempt": attempts,
             "max_retries": max_retries,
             "retry_policy": rp.to_dict(),
@@ -112,6 +115,8 @@ async def _insert_failed_task(
             "error_message": error_message,
             "attempts": attempts,
             "retry_policy": rp.to_dict(),
+            "route": route,
+            "priority": priority,
             "moved_at": now,
         }
     )
@@ -255,3 +260,65 @@ class TestDeadLetterQueue:
         await dlq.discard_task(task_ids[0], reason="test")
         assert await dlq.count() == 2
         assert await dlq.count(include_discarded=True) == 3
+
+    async def test_dlq_entry_preserves_route_and_priority(self, dlq: Any) -> None:
+        """DLQ entries should carry the original route/priority."""
+        task_id = generate_task_id()
+        await _insert_failed_task(
+            dlq,
+            task_id,
+            route="critical",
+            priority=50,
+            error_message="routed failure",
+            attempts=2,
+            max_retries=2,
+        )
+
+        entry = await dlq.get_task(task_id)
+        assert entry is not None
+        assert entry.route == "critical"
+        assert entry.priority == 50
+
+    async def test_retry_preserves_route_and_priority(self, dlq: Any) -> None:
+        """Retrying from the DLQ should keep the task's route/priority."""
+        task_id = generate_task_id()
+        await _insert_failed_task(
+            dlq,
+            task_id,
+            route="critical",
+            priority=50,
+            error_message="routed failure",
+            attempts=2,
+            max_retries=2,
+        )
+
+        await dlq.retry_task(task_id)
+
+        task_row = await dlq._query.select_task(task_id)
+        assert task_row is not None
+        assert task_row["route"] == "critical"
+        assert task_row["priority"] == 50
+
+    async def test_retry_reinsert_preserves_route_and_priority(self, dlq: Any) -> None:
+        """Retrying a hard-deleted task re-inserts with stored route/priority."""
+        task_id = generate_task_id()
+        await _insert_failed_task(
+            dlq,
+            task_id,
+            route="batch",
+            priority=-10,
+            error_message="gone",
+        )
+
+        # Simulate the task row being cascade-deleted
+        await dlq._pool.execute(
+            "DELETE FROM conductor_tasks WHERE task_id = $1",
+            task_id,
+        )
+
+        await dlq.retry_task(task_id)
+
+        task_row = await dlq._query.select_task(task_id)
+        assert task_row is not None
+        assert task_row["route"] == "batch"
+        assert task_row["priority"] == -10

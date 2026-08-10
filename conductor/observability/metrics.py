@@ -66,6 +66,12 @@ tasks_retried = Counter(
     labelnames=["task_type"],
 )
 
+recurring_fired = Counter(
+    "conductor_recurring_fired_total",
+    "Total number of task instances created by the recurring scheduler.",
+    labelnames=["task_type"],
+)
+
 # -- Histogram --
 task_duration = Histogram(
     "conductor_task_duration_seconds",
@@ -131,6 +137,11 @@ def inc_tasks_failed(task_type: str) -> None:
 def inc_tasks_retried(task_type: str) -> None:
     """Increment the retried-task counter for *task_type*."""
     tasks_retried.labels(task_type=task_type).inc()
+
+
+def inc_recurring_fired(task_type: str) -> None:
+    """Increment the recurring-fired counter for *task_type*."""
+    recurring_fired.labels(task_type=task_type).inc()
 
 
 def observe_task_duration(task_type: str, duration_seconds: float) -> None:

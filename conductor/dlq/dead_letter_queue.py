@@ -47,8 +47,9 @@ class DeadLetterQueue:
 
     def __init__(
         self,
-        database_url: str,
+        database_url: str = "",
         *,
+        pool: Optional[DatabasePool] = None,
         log_level: str = "INFO",
         pool_min_size: int = 2,
         pool_max_size: int = 10,
@@ -56,17 +57,22 @@ class DeadLetterQueue:
         command_timeout: float = 60.0,
     ) -> None:
         self._database_url = database_url
+        # ``True`` when this instance owns (and must close) the pool.
+        self._owns_pool = pool is None
 
         # Apply log level to the conductor logger hierarchy
         logging.getLogger("conductor").setLevel(log_level.upper())
 
-        self._pool = DatabasePool(
-            dsn=database_url,
-            min_size=pool_min_size,
-            max_size=pool_max_size,
-            timeout=pool_timeout,
-            command_timeout=command_timeout,
-        )
+        if pool is not None:
+            self._pool = pool
+        else:
+            self._pool = DatabasePool(
+                dsn=database_url,
+                min_size=pool_min_size,
+                max_size=pool_max_size,
+                timeout=pool_timeout,
+                command_timeout=command_timeout,
+            )
         self._queries: Optional[QueryBuilder] = None
         self._connected = False
 
@@ -75,9 +81,15 @@ class DeadLetterQueue:
     # ------------------------------------------------------------------
 
     async def connect(self) -> None:
-        """Connect to the database and ensure the schema exists."""
-        await self._pool.connect()
-        await SchemaManager(self._pool).ensure_schema()
+        """Connect to the database and ensure the schema exists.
+
+        When a shared ``pool`` was supplied to the constructor, this only
+        (re)initialises the query builder — the caller owns the pool and
+        is responsible for its lifecycle.
+        """
+        if self._owns_pool:
+            await self._pool.connect()
+            await SchemaManager(self._pool).ensure_schema()
         self._queries = QueryBuilder(self._pool)
         self._connected = True
         logger.info(
@@ -86,8 +98,9 @@ class DeadLetterQueue:
         )
 
     async def disconnect(self) -> None:
-        """Close the database connection."""
-        await self._pool.disconnect()
+        """Close the database connection (only if owned by this DLQ)."""
+        if self._owns_pool:
+            await self._pool.disconnect()
         self._connected = False
         logger.info(
             "DeadLetterQueue disconnected.",
@@ -208,8 +221,8 @@ class DeadLetterQueue:
                 "task_type": dlq_row["task_type"],
                 "payload": dlq_row.get("payload", {}),
                 "status": "pending",
-                "priority": 0,
-                "route": "default",
+                "priority": dlq_row.get("priority", 0),
+                "route": dlq_row.get("route", "default"),
                 "attempt": 0,
                 "max_retries": rp.max_retries,
                 "retry_policy": rp.to_dict(),

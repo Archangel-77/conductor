@@ -18,6 +18,7 @@ from conductor.core.models import (
     ExponentialBackoff,
     FixedBackoff,
     LinearBackoff,
+    RecurringTask,
     RetryPolicy,
     RetryRecord,
     Task,
@@ -403,3 +404,66 @@ class TestFixedBackoff:
         # initial_delay (50) > max_delay (10), so capped
         assert b.calculate_delay(0) == 10.0
         assert b.calculate_delay(5) == 10.0
+
+
+class TestRecurringTask:
+    """Verify the RecurringTask model construction and serialisation."""
+
+    def test_defaults(self) -> None:
+        """Defaults should match the schema (route default, enabled True)."""
+        rt = RecurringTask(
+            id="rec-1",
+            task_type="cleanup",
+            payload={"keep": 30},
+            cron_expression="0 2 * * *",
+        )
+        assert rt.route == "default"
+        assert rt.priority == 0
+        assert rt.enabled is True
+        assert rt.retry_policy.max_retries == 3
+        assert rt.last_run_at is None
+
+    def test_to_dict_from_dict_round_trip(self) -> None:
+        """to_dict() -> from_dict() should preserve all fields."""
+        now = utc_now()
+        rt = RecurringTask(
+            id="rec-2",
+            task_type="report",
+            payload={"format": "csv"},
+            cron_expression="0 6 * * 1",
+            route="batch",
+            priority=5,
+            retry_policy=RetryPolicy(max_retries=7, backoff_strategy="linear"),
+            enabled=False,
+            next_run_at=now,
+            last_run_at=now,
+            created_at=now,
+        )
+
+        data = rt.to_dict()
+        assert data["id"] == "rec-2"
+        assert data["cron_expression"] == "0 6 * * 1"
+        assert data["route"] == "batch"
+        assert data["priority"] == 5
+        assert data["enabled"] is False
+        assert data["retry_policy"]["backoff_strategy"] == "linear"
+        # datetimes are serialised to ISO strings
+        assert isinstance(data["next_run_at"], str)
+        assert isinstance(data["last_run_at"], str)
+
+        restored = RecurringTask.from_dict(data)
+        assert restored == rt
+
+    def test_from_dict_optional_datetimes(self) -> None:
+        """from_dict() should tolerate missing/None optional datetimes."""
+        rt = RecurringTask.from_dict(
+            {
+                "id": "rec-3",
+                "task_type": "ping",
+                "payload": {},
+                "cron_expression": "*/5 * * * *",
+            }
+        )
+        assert rt.id == "rec-3"
+        assert rt.last_run_at is None
+        assert rt.enabled is True

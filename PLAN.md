@@ -475,10 +475,10 @@ Dependency Graph:
 ## Phase 2: v0.2 Advanced Features
 
 ### Goals
-- 🔲 Task routing (multiple queues/worker pools)
-- 🔲 Priority queues
+- � Task routing (multiple queues/worker pools) — Sprint 1 in progress
+- 🔄 Priority queues — Sprint 1 in progress
 - 🔲 Scheduled/recurring tasks (cron)
-- 🔲 Web dashboard (task monitoring UI)
+- ✅ Web dashboard (task monitoring UI)
 - 🔲 gRPC API (for polyglot workers)
 - 🔲 Circuit breaker pattern
 - 🔲 Task dependencies/chaining
@@ -501,11 +501,18 @@ queue.submit(
 worker = Worker(routes=["critical"])
 ```
 
-**Implementation**:
-- Add `route` column to tasks table
-- Workers subscribe to specific routes
-- Polling query filters by route
-- Allow multiple routes per worker
+**Implementation** (Sprint 1):
+- [x] Add `route` column to tasks table (already in v0.1 schema + index)
+- [x] Workers subscribe to specific routes (`Worker(routes=[...])`)
+- [x] Polling query filters by route (`select_pending_tasks(route=...)`)
+- [x] Allow multiple routes per worker
+- [x] `routes=None` polls **all** routes (single unfiltered query)
+- [x] `TaskQueue.list_pending_tasks(route=...)` filter
+- [x] Routing tests (per-route, multi-route, all-routes) + `examples/6_routing_priority.py`
+
+**Decisions (Sprint 1):**
+- `Worker(routes=None)` (the programmatic default) polls ALL routes. The CLI / `ROUTES` env var defaults to `["default"]` for predictability — this asymmetry is intentional and documented.
+- Routed tasks keep their `route` when retried from the DLQ (schema v2 stores `route`/`priority` on `conductor_dead_letter`).
 
 **Effort**: 1 week
 
@@ -523,11 +530,17 @@ queue.submit(
 )
 ```
 
-**Implementation**:
-- Add `priority` column to tasks table
-- Polling query orders by priority DESC
-- Default priority = 0
-- Range: -100 to 100
+**Implementation** (Sprint 1):
+- [x] Add `priority` column to tasks table (already in v0.1 schema + CHECK + index)
+- [x] Polling query orders by `priority DESC, created_at ASC`
+- [x] Default priority = 0
+- [x] Range: -100 to 100 (DB CHECK + fail-fast validation in `submit()`/`submit_many()`)
+- [x] Priority-ordering tests (worker execution order + queue listing)
+- [x] Priority documented in `docs/configuration.md` + example
+
+**Decisions (Sprint 1):**
+- `priority` is validated up-front in `TaskQueue.submit()`/`submit_many()` (raises `ValueError`), matching the DB CHECK constraint.
+- Prioritized tasks keep their `priority` when retried from the DLQ (schema v2).
 
 **Effort**: 3 days
 
@@ -555,12 +568,19 @@ queue.schedule_recurring(
 )
 ```
 
-**Implementation**:
-- Add `scheduled_for` column to tasks table
-- Create `conductor_recurring_tasks` table (cron definitions)
-- Polling query filters `scheduled_for <= NOW()`
-- Cron parser (use croniter library)
-- Scheduler daemon to create recurring task instances
+**Implementation** (Sprint 2):
+- [x] `scheduled_for` column + polling filter (`scheduled_for <= NOW()`) — done in v0.1
+- [x] `conductor_recurring_tasks` table (cron definitions) — schema v1, composite index in v3
+- [x] Cron parser via croniter (`croniter>=1.4` dependency)
+- [x] `TaskQueue.schedule_recurring()` + management API (`list/get/pause/resume/delete`)
+- [x] `RecurringScheduler` daemon (standalone + optional `Worker(enable_scheduler=True)`)
+- [x] Tests, docs, `examples/7_recurring_tasks.py`
+
+**Decisions (Sprint 2):**
+- Cron is evaluated in **UTC**; missed occurrences are **skipped** (no backfill).
+- Due definitions are claimed with `FOR UPDATE SKIP LOCKED` inside one transaction, so multiple schedulers never double-fire.
+- Schema is at **v3** (`idx_recurring_polling (enabled, next_run_at)`); `ensure_schema()` migrates incrementally (v0→v1→v2→v3).
+- Embedded scheduler is opt-in via `Worker(enable_scheduler=True)` / `CONDUCTOR_ENABLE_SCHEDULER`.
 
 **Effort**: 2 weeks
 
@@ -578,11 +598,20 @@ queue.schedule_recurring(
 4. Metrics (throughput, latency, error rate)
 5. DLQ inspector (failed tasks)
 
-**Implementation**:
-- FastAPI endpoints for task/worker/metrics queries
-- React UI with real-time polling (WebSocket optional)
-- Authentication (API key based)
-- Embed in conductor package or standalone
+**Implementation** (Sprint 4):
+- [x] FastAPI backend (`conductor/api/`): tasks, workers, metrics (JSON), DLQ, health, cancel
+- [x] React + Vite frontend (`conductor/web/`): 5 screens with polling; built `dist/` committed
+- [x] Optional API-key auth (`CONDUCTOR_API_KEY` → `X-API-Key` header; unset = open)
+- [x] Standalone `conductor api` CLI + optional `Worker(api_enabled=True)` embed
+- [x] `TaskStatus.CANCELLED` (schema v4) + `TaskQueue.cancel_task()`
+- [x] Tests (`test_api_app.py` unit, live `test_api.py` integration), docs, `examples/9_web_dashboard.py`
+
+**Decisions (Sprint 4):**
+- Backend is **FastAPI + uvicorn**; frontend is **React + Vite** with hand-rolled SVG charts (no heavy chart lib).
+- The built frontend (`conductor/web/dist`) is **committed** and ships in the wheel — no Node.js at install; rebuild with `npm run build` (CI freshness check), mirroring the committed-gRPC-stubs precedent.
+- The dashboard uses **new non-locking read queries** (`select_tasks`/`count_tasks`/`select_all_workers`); the locked `select_pending_tasks` is never used for reads.
+- Schema is at **v4** (`cancelled` in `chk_task_status`); `ensure_schema()` migrates v0→v1→v2→v3→v4.
+- API key is optional and header-based (`X-API-Key`); WebSocket real-time updates are deferred (polling first).
 
 **Effort**: 3 weeks
 
@@ -885,27 +914,25 @@ CREATE TABLE conductor_workers (
 ```
 
 #### 5. `conductor_recurring_tasks`
-Recurring task definitions (cron).
+Recurring task definitions (cron). (Implemented schema — see `conductor/db/schema.py`.)
 
 ```sql
 CREATE TABLE conductor_recurring_tasks (
-    id SERIAL PRIMARY KEY,
+    id TEXT PRIMARY KEY,                          -- UUID v4
     task_type TEXT NOT NULL,
-    payload JSONB NOT NULL,
-    cron_expression TEXT NOT NULL,              -- "0 2 * * *" (2 AM daily)
-    
-    -- State
-    active BOOLEAN DEFAULT TRUE,
-    last_run_at TIMESTAMP,
-    next_run_at TIMESTAMP NOT NULL,
-    
-    -- Metadata
-    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    created_by TEXT,
-    
-    INDEX idx_next_run_at (next_run_at),
-    INDEX idx_active (active)
+    payload JSONB NOT NULL DEFAULT '{}',
+    cron_expression TEXT NOT NULL,                -- "0 2 * * *" (2 AM daily, UTC)
+    route TEXT NOT NULL DEFAULT 'default',        -- route for generated tasks
+    priority INT NOT NULL DEFAULT 0,              -- priority for generated tasks
+    retry_policy JSONB NOT NULL DEFAULT '{}',     -- retry policy for generated tasks
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,        -- pause/resume
+    next_run_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_run_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    INDEX idx_recurring_next_run (next_run_at),
+    INDEX idx_recurring_enabled (enabled),
+    INDEX idx_recurring_polling (enabled, next_run_at)   -- schema v3
 );
 ```
 
@@ -1514,11 +1541,11 @@ class Worker:
 - [ ] Publish to PyPI
 
 ### Phase 2 (v0.2) – Advanced Features
-- [ ] Task routing
-- [ ] Priority queues
-- [ ] Scheduled & recurring tasks
-- [ ] Web dashboard
-- [ ] gRPC API
+- [x] Task routing
+- [x] Priority queues
+- [x] Scheduled & recurring tasks
+- [x] Web dashboard
+- [x] gRPC API
 - [ ] Circuit breaker
 - [ ] Task dependencies
 

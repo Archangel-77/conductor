@@ -74,6 +74,7 @@ async def auto_cleanup(health_checker: Any) -> Any:
         await pool.execute("DELETE FROM conductor_dead_letter")
         await pool.execute("DELETE FROM conductor_tasks")
         await pool.execute("DELETE FROM conductor_workers")
+        await pool.execute("DELETE FROM conductor_recurring_tasks")
 
 
 # ===================================================================

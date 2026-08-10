@@ -85,6 +85,7 @@ async def _cleanup_test_data(task_queue: Any) -> Any:
         await task_queue.execute_raw("DELETE FROM conductor_dead_letter")
         await task_queue.execute_raw("DELETE FROM conductor_tasks")
         await task_queue.execute_raw("DELETE FROM conductor_workers")
+        await task_queue.execute_raw("DELETE FROM conductor_recurring_tasks")
 
 
 # ===================================================================
@@ -283,6 +284,50 @@ class TestTaskPolling:
             assert t1 is not None and t1.status == TaskStatus.COMPLETED
             assert t2 is not None and t2.status == TaskStatus.COMPLETED
 
+    async def test_poll_all_routes_when_routes_none(
+        self,
+        task_queue: Any,
+    ) -> None:
+        """A worker with ``routes=None`` polls tasks on all routes."""
+        id1 = await task_queue.submit("all_a", {}, route="group_a")
+        id2 = await task_queue.submit("all_b", {}, route="group_b")
+
+        async with Worker(
+            database_url=_db_url(),
+            worker_id="all-routes-test",
+            routes=None,
+            pool_min_size=1,
+            pool_max_size=2,
+            pool_timeout=5.0,
+        ) as worker:
+
+            @worker.task("all_a")
+            async def handler_a(_payload: dict[str, Any]) -> dict[str, Any]:
+                return {"ok": True}
+
+            @worker.task("all_b")
+            async def handler_b(_payload: dict[str, Any]) -> dict[str, Any]:
+                return {"ok": True}
+
+            await worker.run_once()
+
+            t1 = await task_queue.get_task(id1)
+            t2 = await task_queue.get_task(id2)
+            assert t1 is not None and t1.status == TaskStatus.COMPLETED
+            assert t2 is not None and t2.status == TaskStatus.COMPLETED
+
+    async def test_status_routes_none_reports_all(self) -> None:
+        """``get_status()`` reports ``routes is None`` for an all-routes worker."""
+        async with Worker(
+            database_url=_db_url(),
+            worker_id="all-routes-status-test",
+            routes=None,
+            pool_min_size=1,
+            pool_max_size=2,
+            pool_timeout=5.0,
+        ) as worker:
+            assert worker.get_status()["routes"] is None
+
     async def test_poll_empty_queue(self) -> None:
         """Polling with no pending tasks should not raise."""
         async with Worker(
@@ -435,6 +480,36 @@ class TestTaskExecution:
             status = worker.get_status()
             assert status["tasks_processed_total"] == 1
             assert status["tasks_failed_total"] == 1
+
+
+class TestPriorityOrdering:
+
+    async def test_higher_priority_executed_first(self, task_queue: Any) -> None:
+        """Tasks with higher priority execute before lower-priority ones."""
+        executed: list[int] = []
+
+        async with Worker(
+            database_url=_db_url(),
+            worker_id="priority-order-test",
+            routes=["default"],
+            pool_min_size=1,
+            pool_max_size=2,
+            pool_timeout=5.0,
+        ) as worker:
+
+            @worker.task("prio")
+            async def handler(payload: dict[str, Any]) -> dict[str, Any]:
+                executed.append(payload["n"])
+                return {"ok": True}
+
+            # Distinct priorities -> deterministic order regardless of submit order
+            await task_queue.submit("prio", {"n": 3}, route="default", priority=-10)
+            await task_queue.submit("prio", {"n": 1}, route="default", priority=50)
+            await task_queue.submit("prio", {"n": 2}, route="default", priority=0)
+
+            await worker.run_once()
+
+        assert executed == [1, 2, 3]
 
 
 class TestRetryAndDLQ:

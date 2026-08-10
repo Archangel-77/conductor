@@ -1,0 +1,69 @@
+syntax = "proto3";
+
+package conductor;
+
+// Conductor gRPC API.
+//
+// The ConductorWorker service is served by a Conductor Worker process
+// (``grpc_enabled=True``). Polyglot clients (Go, Rust, Node.js, Python)
+// connect to execute tasks, register handlers, and inspect worker status.
+//
+// Payloads and results are carried as JSON-encoded ``bytes`` so clients
+// can stay language-agnostic.
+
+// The ConductorWorker service, served by a Conductor Worker.
+service ConductorWorker {
+  // Execute a task through the worker's registered handler and return the
+  // result or error. By default this is pure execution (no queue writes);
+  // set ``persist`` to record the outcome in ``conductor_tasks``.
+  rpc ProcessTask(TaskRequest) returns (TaskResponse);
+
+  // Register (or declare) a handler for a task_type on this worker.
+  rpc RegisterHandler(RegisterRequest) returns (RegisterResponse);
+
+  // Return worker health and statistics.
+  rpc GetWorkerStatus(StatusRequest) returns (WorkerStatus);
+}
+
+// A request to execute a task.
+message TaskRequest {
+  string task_id = 1;   // optional; echoed back in the response
+  string task_type = 2; // handler to execute
+  bytes payload = 3;    // JSON-encoded payload dict
+  bool persist = 4;     // if true, record the outcome in conductor_tasks
+}
+
+// The result of executing a task.
+message TaskResponse {
+  string task_id = 1;
+  bool success = 2;
+  bytes result = 3;     // JSON-encoded result dict (on success)
+  string error = 4;     // error message (on failure)
+}
+
+// A request to register a handler for a task_type.
+message RegisterRequest {
+  string task_type = 1;
+}
+
+// The result of registering a handler.
+message RegisterResponse {
+  bool registered = 1; // true if newly registered
+  string task_type = 2;
+  string error = 3;
+}
+
+// An empty request for worker status.
+message StatusRequest {}
+
+// Worker health and statistics.
+message WorkerStatus {
+  string worker_id = 1;
+  string status = 2; // idle | processing | unhealthy
+  double uptime_seconds = 3;
+  int64 tasks_processed_total = 4;
+  int64 tasks_failed_total = 5;
+  repeated string registered_handlers = 6;
+  bool grpc_enabled = 7;
+  int32 grpc_port = 8;
+}

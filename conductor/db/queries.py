@@ -13,6 +13,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Optional, cast
 
+from croniter import croniter
+
 from conductor.db.connection import DatabasePool
 from conductor.exceptions import TaskError
 
@@ -30,7 +32,7 @@ def _validate_not_empty(value: Any, name: str) -> None:
 
 
 def _validate_task_status(status: str) -> None:
-    valid = {"pending", "processing", "completed", "failed", "retrying"}
+    valid = {"pending", "processing", "completed", "failed", "retrying", "cancelled"}
     if status not in valid:
         raise ValueError(f"Invalid task status '{status}'. Must be one of {valid}")
 
@@ -39,6 +41,19 @@ def _validate_worker_status(status: str) -> None:
     valid = {"idle", "processing", "unhealthy"}
     if status not in valid:
         raise ValueError(f"Invalid worker status '{status}'. Must be one of {valid}")
+
+
+def _validate_cron_expression(expression: Any) -> None:
+    """Validate a 5-field cron expression using croniter.
+
+    Raises:
+        ValueError: If the expression is empty or cannot be parsed.
+    """
+    _validate_not_empty(expression, "cron_expression")
+    try:
+        croniter(str(expression))
+    except (ValueError, KeyError) as exc:
+        raise ValueError(f"Invalid cron expression '{expression}': {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -62,13 +77,23 @@ class QueryBuilder:
     # Task queries
     # ==================================================================
 
-    async def insert_task(self, task: dict[str, Any]) -> str:
+    async def insert_task(
+        self,
+        task: dict[str, Any],
+        *,
+        conn: Optional[Any] = None,
+    ) -> str:
         """Insert a new task row and return its ``task_id``.
 
         Expects a dictionary with at least:
         ``task_id``, ``task_type``, ``payload``, ``status``, ``priority``,
         ``route``, ``attempt``, ``max_retries``, ``retry_policy``,
         ``scheduled_for``, ``created_at``.
+
+        Args:
+            task: The task dictionary to insert.
+            conn: Optional explicit connection/transaction to use (so the
+                caller can hold locks across a transaction).
         """
         _validate_not_empty(task.get("task_id"), "task_id")
         _validate_not_empty(task.get("task_type"), "task_type")
@@ -89,7 +114,8 @@ class QueryBuilder:
             RETURNING task_id
         """
 
-        row = await self._pool.fetchrow(
+        target = conn if conn is not None else self._pool
+        row = await target.fetchrow(
             query,
             task["task_id"],
             task["task_type"],
@@ -205,6 +231,149 @@ class QueryBuilder:
         """Shorthand for ``select_tasks_by_status('failed', ...)``."""
         return await self.select_tasks_by_status("failed", limit, offset)
 
+    async def select_tasks(
+        self,
+        limit: int = 10,
+        offset: int = 0,
+        *,
+        status: Optional[str] = None,
+        route: Optional[str] = None,
+        task_type: Optional[str] = None,
+        search: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch tasks across all statuses for the dashboard.
+
+        Non-locking read (unlike ``select_pending_tasks``, which uses
+        ``FOR UPDATE SKIP LOCKED``); filters are optional and combined
+        with ``AND``.  ``search`` matches ``task_id`` or ``task_type``
+        case-insensitively (ILIKE).
+
+        Args:
+            limit: Maximum number of tasks to return.
+            offset: Number of tasks to skip (for pagination).
+            status: Optional status filter.
+            route: Optional route filter.
+            task_type: Optional task-type filter.
+            search: Optional free-text search on ``task_id``/``task_type``.
+
+        Returns:
+            A list of task dicts ordered by ``created_at DESC``.
+
+        Raises:
+            ValueError: If ``limit``/``offset`` are invalid, or a filter
+                value is empty.
+        """
+        if limit < 1:
+            raise ValueError("limit must be >= 1")
+        if offset < 0:
+            raise ValueError("offset must be >= 0")
+        if status is not None:
+            _validate_task_status(status)
+        if route is not None:
+            _validate_not_empty(route, "route")
+        if task_type is not None:
+            _validate_not_empty(task_type, "task_type")
+        if search is not None:
+            _validate_not_empty(search, "search")
+
+        conditions: list[str] = []
+        params: list[Any] = []
+        idx = 1
+
+        if status is not None:
+            conditions.append(f"status = ${idx}")
+            params.append(status)
+            idx += 1
+        if route is not None:
+            conditions.append(f"route = ${idx}")
+            params.append(route)
+            idx += 1
+        if task_type is not None:
+            conditions.append(f"task_type = ${idx}")
+            params.append(task_type)
+            idx += 1
+        if search is not None:
+            conditions.append(f"(task_id ILIKE ${idx} OR task_type ILIKE ${idx + 1})")
+            params.append(f"%{search}%")
+            params.append(f"%{search}%")
+            idx += 2
+
+        where_clause = ""
+        if conditions:
+            where_clause = "WHERE " + " AND ".join(conditions)
+
+        query = f"""
+            SELECT * FROM conductor_tasks
+            {where_clause}
+            ORDER BY created_at DESC
+            LIMIT ${idx} OFFSET ${idx + 1}
+        """
+        rows = await self._pool.fetch(query, *params, limit, offset)
+        return [_row_to_dict(r) for r in rows]
+
+    async def count_tasks(
+        self,
+        *,
+        status: Optional[str] = None,
+        route: Optional[str] = None,
+        task_type: Optional[str] = None,
+        search: Optional[str] = None,
+    ) -> int:
+        """Count tasks matching the given filters (dashboard pagination).
+
+        Shares the same filter semantics as ``select_tasks``.
+
+        Args:
+            status: Optional status filter.
+            route: Optional route filter.
+            task_type: Optional task-type filter.
+            search: Optional free-text search on ``task_id``/``task_type``.
+
+        Returns:
+            The number of matching tasks.
+
+        Raises:
+            ValueError: If a filter value is empty.
+        """
+        if status is not None:
+            _validate_task_status(status)
+        if route is not None:
+            _validate_not_empty(route, "route")
+        if task_type is not None:
+            _validate_not_empty(task_type, "task_type")
+        if search is not None:
+            _validate_not_empty(search, "search")
+
+        conditions: list[str] = []
+        params: list[Any] = []
+        idx = 1
+
+        if status is not None:
+            conditions.append(f"status = ${idx}")
+            params.append(status)
+            idx += 1
+        if route is not None:
+            conditions.append(f"route = ${idx}")
+            params.append(route)
+            idx += 1
+        if task_type is not None:
+            conditions.append(f"task_type = ${idx}")
+            params.append(task_type)
+            idx += 1
+        if search is not None:
+            conditions.append(f"(task_id ILIKE ${idx} OR task_type ILIKE ${idx + 1})")
+            params.append(f"%{search}%")
+            params.append(f"%{search}%")
+            idx += 2
+
+        where_clause = ""
+        if conditions:
+            where_clause = "WHERE " + " AND ".join(conditions)
+
+        query = f"SELECT COUNT(*) FROM conductor_tasks {where_clause}"
+        row = await self._pool.fetchval(query, *params)
+        return row or 0
+
     async def update_task_status(
         self,
         task_id: str,
@@ -262,6 +431,25 @@ class QueryBuilder:
         query = f"UPDATE conductor_tasks SET {', '.join(set_parts)} " f"WHERE task_id = $1"
 
         result_tag = await self._pool.execute(query, *params)
+        return "UPDATE 1" in result_tag
+
+    async def cancel_task(self, task_id: str) -> bool:
+        """Cancel a pending or retrying task.
+
+        Sets the task's status to ``cancelled`` and stamps ``completed_at``.
+        Only tasks in ``pending`` or ``retrying`` can be cancelled.
+
+        Returns ``True`` if the task was cancelled, ``False`` if the task
+        was not found or is not in a cancellable state.
+        """
+        _validate_not_empty(task_id, "task_id")
+
+        result_tag = await self._pool.execute(
+            "UPDATE conductor_tasks "
+            "SET status = 'cancelled', completed_at = NOW() "
+            "WHERE task_id = $1 AND status IN ('pending', 'retrying')",
+            task_id,
+        )
         return "UPDATE 1" in result_tag
 
     async def clear_task_worker_id(self, task_id: str) -> bool:
@@ -348,14 +536,18 @@ class QueryBuilder:
         query = """
             INSERT INTO conductor_dead_letter (
                 task_id, task_type, payload, error_message, attempts,
-                retry_policy, moved_at, discarded, discard_reason, discarded_at
+                retry_policy, route, priority, moved_at, discarded,
+                discard_reason, discarded_at
             ) VALUES (
                 $1, $2, $3::jsonb, $4, $5,
-                $6::jsonb, $7, $8, $9, $10
+                $6::jsonb, $7, $8, $9, $10,
+                $11, $12
             )
             ON CONFLICT (task_id) DO UPDATE SET
                 error_message = EXCLUDED.error_message,
                 attempts     = EXCLUDED.attempts,
+                route        = EXCLUDED.route,
+                priority     = EXCLUDED.priority,
                 moved_at     = EXCLUDED.moved_at,
                 discarded    = FALSE,
                 discard_reason = NULL,
@@ -370,6 +562,8 @@ class QueryBuilder:
             dlq.get("error_message"),
             dlq.get("attempts", 0),
             _json(dlq.get("retry_policy", {})),
+            dlq.get("route", "default"),
+            dlq.get("priority", 0),
             dlq.get("moved_at", datetime.now(timezone.utc)),
             dlq.get("discarded", False),
             dlq.get("discard_reason"),
@@ -455,6 +649,184 @@ class QueryBuilder:
         return "UPDATE 1" in result
 
     # ==================================================================
+    # Recurring task queries
+    # ==================================================================
+
+    async def insert_recurring_task(
+        self,
+        recurring: dict[str, Any],
+        *,
+        conn: Optional[Any] = None,
+    ) -> str:
+        """Insert a recurring-task definition.  Returns its ``id``.
+
+        Args:
+            recurring: Dictionary with ``id``, ``task_type``, ``payload``,
+                ``cron_expression``, ``route``, ``priority``, ``retry_policy``,
+                ``enabled``, ``next_run_at``, ``last_run_at``, ``created_at``.
+            conn: Optional explicit connection/transaction to use.
+
+        Raises:
+            ValueError: If ``cron_expression`` is invalid.
+            TaskError: If the ``id`` already exists.
+        """
+        _validate_not_empty(recurring.get("id"), "id")
+        _validate_not_empty(recurring.get("task_type"), "task_type")
+        _validate_cron_expression(recurring.get("cron_expression"))
+
+        query = """
+            INSERT INTO conductor_recurring_tasks (
+                id, task_type, payload, cron_expression, route, priority,
+                retry_policy, enabled, next_run_at, last_run_at, created_at
+            ) VALUES (
+                $1, $2, $3::jsonb, $4, $5, $6,
+                $7::jsonb, $8, $9, $10, $11
+            )
+            ON CONFLICT (id) DO NOTHING
+            RETURNING id
+        """
+        target = conn if conn is not None else self._pool
+        row = await target.fetchrow(
+            query,
+            recurring["id"],
+            recurring["task_type"],
+            _json(recurring.get("payload", {})),
+            recurring["cron_expression"],
+            recurring.get("route", "default"),
+            recurring.get("priority", 0),
+            _json(recurring.get("retry_policy", {})),
+            recurring.get("enabled", True),
+            recurring.get("next_run_at", datetime.now(timezone.utc)),
+            recurring.get("last_run_at"),
+            recurring.get("created_at", datetime.now(timezone.utc)),
+        )
+        if row is None:
+            raise TaskError(f"Recurring task '{recurring['id']}' already exists")
+
+        return cast(str, row["id"])
+
+    async def select_recurring_task(
+        self,
+        recurring_id: str,
+        *,
+        conn: Optional[Any] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Fetch a single recurring definition by ID."""
+        _validate_not_empty(recurring_id, "recurring_id")
+
+        query = "SELECT * FROM conductor_recurring_tasks WHERE id = $1"
+        target = conn if conn is not None else self._pool
+        row = await target.fetchrow(query, recurring_id)
+        return _row_to_dict(row) if row else None
+
+    async def select_recurring_tasks(
+        self,
+        limit: int = 10,
+        offset: int = 0,
+        *,
+        conn: Optional[Any] = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch recurring definitions, newest first."""
+        if limit < 1:
+            raise ValueError("limit must be >= 1")
+        if offset < 0:
+            raise ValueError("offset must be >= 0")
+
+        query = """
+            SELECT * FROM conductor_recurring_tasks
+            ORDER BY created_at DESC
+            LIMIT $1 OFFSET $2
+        """
+        target = conn if conn is not None else self._pool
+        rows = await target.fetch(query, limit, offset)
+        return [_row_to_dict(r) for r in rows]
+
+    async def select_due_recurring_tasks(
+        self,
+        now: datetime,
+        limit: int = 50,
+        *,
+        conn: Optional[Any] = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch enabled recurring definitions due at or before *now*.
+
+        Locks the rows with ``FOR UPDATE SKIP LOCKED`` so multiple schedulers
+        can safely claim definitions without double-firing.  The caller must
+        hold the enclosing transaction until the next-run advancement commits.
+        """
+        if limit < 1:
+            raise ValueError("limit must be >= 1")
+
+        query = """
+            SELECT * FROM conductor_recurring_tasks
+            WHERE enabled = TRUE AND next_run_at <= $1
+            ORDER BY next_run_at ASC
+            LIMIT $2
+            FOR UPDATE SKIP LOCKED
+        """
+        target = conn if conn is not None else self._pool
+        rows = await target.fetch(query, now, limit)
+        return [_row_to_dict(r) for r in rows]
+
+    async def update_recurring_run(
+        self,
+        recurring_id: str,
+        *,
+        last_run_at: datetime,
+        next_run_at: datetime,
+        conn: Optional[Any] = None,
+    ) -> bool:
+        """Record a fired run and advance the next run time.
+
+        Returns ``True`` if a row was updated.
+        """
+        _validate_not_empty(recurring_id, "recurring_id")
+
+        query = """
+            UPDATE conductor_recurring_tasks
+            SET last_run_at = $2, next_run_at = $3
+            WHERE id = $1
+        """
+        target = conn if conn is not None else self._pool
+        result = await target.execute(query, recurring_id, last_run_at, next_run_at)
+        return "UPDATE 1" in result
+
+    async def set_recurring_enabled(
+        self,
+        recurring_id: str,
+        enabled: bool,
+        *,
+        conn: Optional[Any] = None,
+    ) -> bool:
+        """Enable or disable a recurring definition.
+
+        Returns ``True`` if a row was updated.
+        """
+        _validate_not_empty(recurring_id, "recurring_id")
+
+        query = "UPDATE conductor_recurring_tasks SET enabled = $2 WHERE id = $1"
+        target = conn if conn is not None else self._pool
+        result = await target.execute(query, recurring_id, enabled)
+        return "UPDATE 1" in result
+
+    async def delete_recurring_task(
+        self,
+        recurring_id: str,
+        *,
+        conn: Optional[Any] = None,
+    ) -> bool:
+        """Delete a recurring definition.
+
+        Returns ``True`` if a row was deleted.
+        """
+        _validate_not_empty(recurring_id, "recurring_id")
+
+        query = "DELETE FROM conductor_recurring_tasks WHERE id = $1"
+        target = conn if conn is not None else self._pool
+        result = await target.execute(query, recurring_id)
+        return "DELETE 1" in result
+
+    # ==================================================================
     # Worker queries
     # ==================================================================
 
@@ -517,6 +889,39 @@ class QueryBuilder:
             ORDER BY last_heartbeat DESC
         """
         rows = await self._pool.fetch(query, heartbeat_timeout)
+        return [_row_to_dict(r) for r in rows]
+
+    async def select_all_workers(
+        self,
+        limit: int = 10,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Fetch all registered workers, newest heartbeat first.
+
+        Unlike ``select_active_workers``, this includes workers whose
+        heartbeat has lapsed (the dashboard's "all workers" view).
+
+        Args:
+            limit: Maximum number of workers to return.
+            offset: Number of workers to skip (for pagination).
+
+        Returns:
+            A list of worker dicts ordered by ``last_heartbeat DESC``.
+
+        Raises:
+            ValueError: If ``limit``/``offset`` are invalid.
+        """
+        if limit < 1:
+            raise ValueError("limit must be >= 1")
+        if offset < 0:
+            raise ValueError("offset must be >= 0")
+
+        query = """
+            SELECT * FROM conductor_workers
+            ORDER BY last_heartbeat DESC NULLS LAST
+            LIMIT $1 OFFSET $2
+        """
+        rows = await self._pool.fetch(query, limit, offset)
         return [_row_to_dict(r) for r in rows]
 
     async def update_worker_heartbeat(

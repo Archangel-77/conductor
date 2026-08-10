@@ -175,3 +175,4 @@ async def auto_cleanup(  # noqa: N802  # pylint: disable=redefined-outer-name
         await db_pool.execute("DELETE FROM conductor_dead_letter")
         await db_pool.execute("DELETE FROM conductor_tasks")
         await db_pool.execute("DELETE FROM conductor_workers")
+        await db_pool.execute("DELETE FROM conductor_recurring_tasks")
