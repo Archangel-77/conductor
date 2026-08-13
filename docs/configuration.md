@@ -37,6 +37,10 @@ default. Values are parsed to the correct types (`CONCURRENCY` is an int,
 | `CONDUCTOR_API_ENABLED` | `false` | Serve the web dashboard (FastAPI + built frontend) in the worker |
 | `CONDUCTOR_API_PORT` | `8080` | Dashboard server port |
 | `CONDUCTOR_API_KEY` | *(none)* | Optional API key; when set, `/api/*` requires an `X-API-Key` header (empty = open) |
+| `CONDUCTOR_CIRCUIT_BREAKER_ENABLED` | `false` | Enable the per-task-type circuit breaker (worker-side, in-memory) |
+| `CONDUCTOR_CIRCUIT_BREAKER_THRESHOLD` | `5` | Consecutive failures before the circuit opens |
+| `CONDUCTOR_CIRCUIT_BREAKER_TIMEOUT` | `60` | Seconds the circuit stays open before half-open probes |
+| `CONDUCTOR_CIRCUIT_BREAKER_HALF_OPEN_ATTEMPTS` | `2` | Probe executions allowed while half-open |
 | `CONDUCTOR_HANDLERS_MODULE` | *(none)* | Dotted path to a module exposing `register(worker)` |
 
 > **Note:** The CLI/`ROUTES` env default is `["default"]`.  Programmatically,
@@ -93,8 +97,18 @@ worker = Worker(
     api_enabled=False,               # serve the web dashboard (FastAPI + SPA)
     api_port=8080,                   # dashboard server port
     api_key=None,                    # optional API key (X-API-Key header)
+    circuit_breaker_enabled=False,   # per-task-type circuit breaker
+    circuit_breaker_config=None,     # optional CircuitBreakerConfig (global)
+    circuit_breaker_overrides=None,  # optional per-task-type configs
 )
 ```
+
+Circuit breakers are enabled per worker with
+`circuit_breaker_enabled=True`; global defaults come from the
+`CONDUCTOR_CIRCUIT_BREAKER_*` env vars, and per-task-type overrides are passed
+programmatically via `circuit_breaker_overrides` (a
+`dict[task_type, CircuitBreakerConfig]`).  See
+[Circuit Breaker](api-reference.md#circuit-breaker).
 
 ### DeadLetterQueue
 
@@ -193,6 +207,23 @@ async with scheduler:
 Manage definitions via `schedule_recurring()`, `list_recurring_tasks()`,
 `get_recurring_task()`, `pause_recurring()`, `resume_recurring()`, and
 `delete_recurring_task()`.
+
+## Task Dependencies & Chaining
+
+Chain tasks with `TaskQueue.submit(..., depends_on=[...])` — a dependent task
+is not polled until its dependencies complete (or are cancelled):
+
+```python
+a = await queue.submit("download", {"url": "..."})
+b = await queue.submit("process", {}, depends_on=[a])
+```
+
+- A task whose dependencies are not all `completed`/`cancelled` stays
+  `pending` (excluded from polling).
+- If a dependency **fails**, dependents are marked **`blocked`** (terminal,
+  `dependency '<id>' failed`) — propagating transitively (A→B→C).
+- `depends_on` is preserved across DLQ retries. No environment variables are
+  involved — chaining is a submit-time API (schema **v5**).
 
 ## WorkerSettings
 

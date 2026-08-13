@@ -72,6 +72,12 @@ recurring_fired = Counter(
     labelnames=["task_type"],
 )
 
+tasks_rejected = Counter(
+    "conductor_tasks_rejected_total",
+    "Tasks skipped because their circuit was open.",
+    labelnames=["task_type"],
+)
+
 # -- Histogram --
 task_duration = Histogram(
     "conductor_task_duration_seconds",
@@ -113,6 +119,12 @@ pending_tasks = Gauge(
     "Number of tasks with status 'pending'.",
 )
 
+circuit_breaker_open = Gauge(
+    "conductor_circuit_breaker_open",
+    "1 if the circuit for a task_type is open or half-open.",
+    labelnames=["task_type"],
+)
+
 
 # ==================================================================
 # Metric hook functions
@@ -144,6 +156,11 @@ def inc_recurring_fired(task_type: str) -> None:
     recurring_fired.labels(task_type=task_type).inc()
 
 
+def inc_tasks_rejected(task_type: str) -> None:
+    """Increment the rejected-task counter for *task_type*."""
+    tasks_rejected.labels(task_type=task_type).inc()
+
+
 def observe_task_duration(task_type: str, duration_seconds: float) -> None:
     """Record an observation of task execution duration.
 
@@ -167,6 +184,11 @@ def set_dlq_size(count: int) -> None:
 def set_pending_tasks(count: int) -> None:
     """Set the pending-tasks gauge to *count*."""
     pending_tasks.set(count)
+
+
+def set_circuit_breaker_open(task_type: str, value: int) -> None:
+    """Set the circuit-breaker gauge for *task_type* to *value* (0 or 1)."""
+    circuit_breaker_open.labels(task_type=task_type).set(value)
 
 
 # ==================================================================
@@ -319,11 +341,11 @@ class MetricsExporter:
                 return_exceptions=True,
             )
 
-            if not isinstance(pending, Exception):
+            if not isinstance(pending, BaseException):
                 set_pending_tasks(pending)
-            if not isinstance(dlq, Exception):
+            if not isinstance(dlq, BaseException):
                 set_dlq_size(dlq)
-            if not isinstance(workers, Exception):
+            if not isinstance(workers, BaseException):
                 set_workers_active(len(workers))
 
         except (OSError, RuntimeError) as exc:

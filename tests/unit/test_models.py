@@ -44,6 +44,8 @@ class TestTaskStatus:
         assert TaskStatus.COMPLETED.value == "completed"
         assert TaskStatus.FAILED.value == "failed"
         assert TaskStatus.RETRYING.value == "retrying"
+        assert TaskStatus.CANCELLED.value == "cancelled"
+        assert TaskStatus.BLOCKED.value == "blocked"
 
     def test_str(self) -> None:
         assert str(TaskStatus.PENDING) == "pending"
@@ -220,6 +222,15 @@ class TestTask:
         assert t1.task_id == t2.task_id
         assert t1.task_type == t2.task_type
         assert t1.status == t2.status
+
+    def test_depends_on_round_trip(self, sample_task_dict: Any) -> None:
+        """``depends_on`` survives a to_dict/from_dict round-trip."""
+        data = dict(sample_task_dict)
+        data["depends_on"] = ["dep-a", "dep-b"]
+        task = Task.from_dict(data)
+        assert task.depends_on == ["dep-a", "dep-b"]
+        restored = Task.from_dict(task.to_dict())
+        assert restored.depends_on == ["dep-a", "dep-b"]
 
     def test_multiple_task_ids_unique(self) -> None:
         ids = {generate_task_id() for _ in range(100)}

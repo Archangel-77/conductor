@@ -6,6 +6,7 @@ and DLQ — no database required.
 """
 
 # pylint: disable=missing-class-docstring,missing-function-docstring
+# pylint: disable=unused-argument,redefined-outer-name
 
 from __future__ import annotations
 
@@ -25,6 +26,7 @@ VALID_STATUSES = {
     "failed",
     "retrying",
     "cancelled",
+    "blocked",
 }
 
 

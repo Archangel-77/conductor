@@ -24,7 +24,7 @@ pytestmark = pytest.mark.integration
 class TestSchemaConstants:
 
     def test_schema_version(self) -> None:
-        assert SCHEMA_VERSION == 4
+        assert SCHEMA_VERSION == 5
 
     def test_version_table_sql(self) -> None:
         assert "conductor_version" in CREATE_VERSION_TABLE
@@ -59,10 +59,10 @@ class TestTableCreation:
             assert row is not None, f"Table '{table}' not found"
 
     async def test_version_tracked(self, db_pool: Any) -> None:
-        """The conductor_version table should record the latest version (4)."""
+        """The conductor_version table should record the latest version (5)."""
         row = await db_pool.fetchrow("SELECT MAX(version) AS version FROM conductor_version")
         assert row is not None
-        assert row["version"] == 4
+        assert row["version"] == 5
 
 
 # ===================================================================
@@ -91,6 +91,16 @@ class TestConstraints:
             "cancelled-status-task",
             "test",
             "cancelled",
+        )
+        assert "INSERT" in result
+
+    async def test_blocked_status_allowed(self, db_pool: Any) -> None:
+        """The ``blocked`` status should be accepted by the CHECK."""
+        result = await db_pool.execute(
+            "INSERT INTO conductor_tasks (task_id, task_type, status) VALUES ($1, $2, $3)",
+            "blocked-status-task",
+            "test",
+            "blocked",
         )
         assert "INSERT" in result
 
@@ -137,6 +147,9 @@ class TestIndexes:
     async def test_tasks_polling_index(self, db_pool: Any) -> None:
         assert await self._index_exists(db_pool, "idx_tasks_polling")
 
+    async def test_tasks_depends_on_index(self, db_pool: Any) -> None:
+        assert await self._index_exists(db_pool, "idx_tasks_depends_on")
+
     async def test_workers_heartbeat_index(self, db_pool: Any) -> None:
         assert await self._index_exists(db_pool, "idx_workers_last_heartbeat")
 
@@ -175,6 +188,7 @@ class TestIdempotentMigrations:
         assert 2 in versions
         assert 3 in versions
         assert 4 in versions
+        assert 5 in versions
 
     async def test_dead_letter_route_priority_columns(self, db_pool: Any) -> None:
         """The dead-letter table should expose route/priority columns."""
@@ -185,6 +199,15 @@ class TestIdempotentMigrations:
         )
         cols = {r["column_name"] for r in rows}
         assert {"route", "priority"} <= cols
+
+    async def test_dead_letter_depends_on_column(self, db_pool: Any) -> None:
+        """The dead-letter table should carry ``depends_on`` forward."""
+        rows = await db_pool.fetch(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'conductor_dead_letter' "
+            "AND column_name = 'depends_on'"
+        )
+        assert rows
 
 
 # ===================================================================
@@ -223,7 +246,7 @@ class TestMigrationUpgrade:
         await schema_manager.ensure_schema()
 
         current = await schema_manager.get_current_version()
-        assert current == 4
+        assert current == 5
 
         # Index is back
         row = await db_pool.fetchrow(
@@ -240,14 +263,14 @@ class TestMigrationUpgrade:
     async def test_migrates_v3_to_v4(self, schema_manager: Any, db_pool: Any) -> None:
         """A v3 database gains the ``cancelled`` status via the v3→v4 migration."""
         # Simulate a v3 database: re-add the v3 CHECK (no ``cancelled``)
-        # and drop the v4 version row.
+        # and drop the version rows above 3.
         await db_pool.execute("ALTER TABLE conductor_tasks DROP CONSTRAINT chk_task_status")
         await db_pool.execute(
             "ALTER TABLE conductor_tasks ADD CONSTRAINT chk_task_status CHECK ("
             "status IN ('pending', 'processing', 'completed', 'failed', 'retrying')"
             ")"
         )
-        await db_pool.execute("DELETE FROM conductor_version WHERE version = 4")
+        await db_pool.execute("DELETE FROM conductor_version WHERE version >= 4")
 
         current = await schema_manager.get_current_version()
         assert current == 3
@@ -256,7 +279,7 @@ class TestMigrationUpgrade:
         await schema_manager.ensure_schema()
 
         current = await schema_manager.get_current_version()
-        assert current == 4
+        assert current == 5
 
         # The new status is accepted by the migrated constraint
         result = await db_pool.execute(
@@ -264,5 +287,37 @@ class TestMigrationUpgrade:
             "v3-migrated-cancelled",
             "test",
             "cancelled",
+        )
+        assert "INSERT" in result
+
+    async def test_migrates_v4_to_v5(self, schema_manager: Any, db_pool: Any) -> None:
+        """A v4 database gains ``depends_on`` + the ``blocked`` status."""
+        # Simulate a v4 database: drop the v5 column/index + version row.
+        await db_pool.execute("ALTER TABLE conductor_tasks DROP COLUMN IF EXISTS depends_on")
+        await db_pool.execute("DROP INDEX IF EXISTS idx_tasks_depends_on")
+        await db_pool.execute("DELETE FROM conductor_version WHERE version = 5")
+
+        current = await schema_manager.get_current_version()
+        assert current == 4
+
+        # Upgrade back to v5.
+        await schema_manager.ensure_schema()
+
+        current = await schema_manager.get_current_version()
+        assert current == 5
+
+        # The depends_on column exists and accepts a task with dependencies.
+        rows = await db_pool.fetch(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'conductor_tasks' AND column_name = 'depends_on'"
+        )
+        assert rows
+
+        result = await db_pool.execute(
+            "INSERT INTO conductor_tasks (task_id, task_type, status, depends_on) "
+            "VALUES ($1, $2, 'pending', $3)",
+            "v4-migrated-dep",
+            "test",
+            ["some-dep"],
         )
         assert "INSERT" in result

@@ -38,6 +38,12 @@ from conductor.core.models import (
     get_hostname,
     utc_now,
 )
+from conductor.circuit_breaker import (
+    CircuitBreaker,
+    CircuitBreakerConfig,
+    CircuitBreakerRegistry,
+    CircuitState,
+)
 from conductor.core.queue import _task_to_db_dict
 from conductor.db.connection import DatabasePool
 from conductor.db.queries import QueryBuilder
@@ -46,8 +52,10 @@ from conductor.exceptions import WorkerError
 from conductor.observability.metrics import (
     inc_tasks_completed,
     inc_tasks_failed,
+    inc_tasks_rejected,
     inc_tasks_retried,
     observe_task_duration,
+    set_circuit_breaker_open,
 )
 from conductor.observability.health import HealthChecker
 from conductor.observability.metrics import MetricsExporter
@@ -97,6 +105,9 @@ class Worker:
         api_port: int = 8080,
         api_enabled: bool = False,
         api_key: Optional[str] = None,
+        circuit_breaker_enabled: bool = False,
+        circuit_breaker_config: Optional[CircuitBreakerConfig] = None,
+        circuit_breaker_overrides: Optional[dict[str, CircuitBreakerConfig]] = None,
     ) -> None:
         # Worker identity
         hostname = get_hostname()
@@ -123,6 +134,19 @@ class Worker:
         self._api_enabled = api_enabled
         self._api_key = api_key
         self._log_level = log_level
+
+        # Circuit breaker (per-task-type, in-memory)
+        self._circuit_breaker_enabled = circuit_breaker_enabled
+        self._circuit_breaker_config = circuit_breaker_config or CircuitBreakerConfig()
+        self._circuit_breaker_registry: Optional[CircuitBreakerRegistry] = (
+            CircuitBreakerRegistry(
+                enabled=circuit_breaker_enabled,
+                default_config=self._circuit_breaker_config,
+                overrides=circuit_breaker_overrides,
+            )
+            if circuit_breaker_enabled
+            else None
+        )
 
         # Apply log level
         logging.getLogger("conductor").setLevel(log_level.upper())
@@ -616,6 +640,20 @@ class Worker:
         self._current_task_id = task.task_id
         task_type = task.task_type
 
+        # Skip execution while the circuit for this task type is open.
+        breaker = self._get_circuit_breaker(task_type)
+        if breaker is not None and not breaker.allow_request():
+            inc_tasks_rejected(task_type)
+            self._set_circuit_breaker_metric(task_type, breaker)
+            logger.warning(
+                "Circuit open for task_type '%s'; skipping task %s (leaving pending).",
+                task_type,
+                task.task_id,
+                extra={"task_id": task.task_id, "task_type": task_type},
+            )
+            self._current_task_id = None
+            return
+
         # Update task status to "processing"
         await self._update_status(task.task_id, TaskStatus.PROCESSING)
 
@@ -653,6 +691,9 @@ class Worker:
             )
             inc_tasks_failed(task_type)
             observe_task_duration(task_type, duration_sec)
+            if breaker is not None:
+                breaker.record_failure()
+                self._set_circuit_breaker_metric(task_type, breaker)
             await self._handle_task_failure(task, error_msg)
             self._tasks_failed_total += 1
             self._current_task_id = None
@@ -675,6 +716,10 @@ class Worker:
         inc_tasks_completed(task_type)
         observe_task_duration(task_type, duration_sec)
 
+        if breaker is not None:
+            breaker.record_success()
+            self._set_circuit_breaker_metric(task_type, breaker)
+
         logger.info(
             "Task %s (%s) completed in %.0fms.",
             task.task_id,
@@ -685,6 +730,23 @@ class Worker:
                 "task_type": task_type,
                 "duration_ms": duration_ms,
             },
+        )
+
+    # ------------------------------------------------------------------
+    # Circuit breaker helpers
+    # ------------------------------------------------------------------
+
+    def _get_circuit_breaker(self, task_type: str) -> Optional[CircuitBreaker]:
+        """Return the circuit breaker for *task_type* (``None`` if disabled)."""
+        if self._circuit_breaker_registry is None:
+            return None
+        return self._circuit_breaker_registry.get(task_type)
+
+    def _set_circuit_breaker_metric(self, task_type: str, breaker: CircuitBreaker) -> None:
+        """Update the circuit-breaker-open gauge for *task_type*."""
+        set_circuit_breaker_open(
+            task_type,
+            1 if breaker.state is not CircuitState.CLOSED else 0,
         )
 
     async def _handle_task_failure(
@@ -765,6 +827,7 @@ class Worker:
                     "retry_policy": task.retry_policy.to_dict(),
                     "route": task.route,
                     "priority": task.priority,
+                    "depends_on": task.depends_on,
                     "moved_at": now,
                 }
             )
@@ -777,6 +840,9 @@ class Worker:
                 error_message=error_message,
                 attempt=new_attempt,
             )
+
+            # Tasks that depend on this one can never run — mark them blocked.
+            await self._propagate_terminal_dependency(task.task_id)
 
             logger.warning(
                 "Task %s (%s) moved to DLQ after %d attempts. Last error: %s",
@@ -791,6 +857,39 @@ class Worker:
                     "error": error_message,
                 },
             )
+
+    async def _propagate_terminal_dependency(self, task_id: str) -> None:
+        """Mark pending tasks that depend on *task_id* as ``blocked``.
+
+        Propagates transitively: tasks blocked here may themselves have
+        dependents, which are marked in turn.  The loop is bounded to
+        protect against pathological chains.
+
+        Args:
+            task_id: The task that reached a terminal failure.
+        """
+        queries = self._queries
+        assert queries is not None
+
+        error_message = f"dependency '{task_id}' failed"
+        frontier = [task_id]
+        seen: set[str] = set()
+        for _ in range(200):
+            newly_blocked: list[str] = []
+            for tid in frontier:
+                for dep in await queries.mark_dependents_blocked(tid, error_message):
+                    if dep not in seen:
+                        seen.add(dep)
+                        newly_blocked.append(dep)
+                        logger.warning(
+                            "Task %s blocked because its dependency '%s' failed.",
+                            dep,
+                            tid,
+                            extra={"task_id": dep, "error": error_message},
+                        )
+            if not newly_blocked:
+                break
+            frontier = newly_blocked
 
     async def _update_status(
         self,
@@ -1062,6 +1161,8 @@ class Worker:
             - ``api_enabled`` — whether a dashboard server is configured
             - ``api_port`` — the configured dashboard port
             - ``api_serving`` — whether the dashboard server is up
+            - ``circuit_breaker_enabled`` — whether a circuit breaker is configured
+            - ``circuit_breaker_open`` — task types whose circuit is open/half-open
         """
         uptime = 0.0
         if self._started_at is not None:
@@ -1097,6 +1198,12 @@ class Worker:
                 self._dashboard_server.get_status()["serving"]
                 if self._dashboard_server is not None
                 else False
+            ),
+            "circuit_breaker_enabled": self._circuit_breaker_enabled,
+            "circuit_breaker_open": (
+                self._circuit_breaker_registry.open_types()
+                if self._circuit_breaker_registry is not None
+                else []
             ),
         }
 

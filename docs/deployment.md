@@ -10,11 +10,11 @@ can be validated locally without Docker via `scripts/validate_deploy.py`.
 A production-ready `Dockerfile` is included:
 
 ```bash
-docker build -t conductor:0.1.0 .
+docker build -t conductor:0.2.0 .
 docker run --rm \
   -e DATABASE_URL=postgresql://user:pass@pg-host:5432/conductor \
   -p 8000:8000 \
-  conductor:0.1.0
+  conductor:0.2.0
 ```
 
 The image:
@@ -31,7 +31,7 @@ docker run --rm \
   -v "$PWD/myapp:/app/handlers" \
   -e DATABASE_URL=postgresql://... \
   -e CONDUCTOR_HANDLERS_MODULE=handlers.myapp \
-  conductor:0.1.0
+  conductor:0.2.0
 ```
 
 ## Docker Compose

@@ -1,3 +1,11 @@
+# pyright: reportPrivateUsage=false
+# This test file intentionally injects mocks into private TaskQueue
+# internals (_pool/_queries/_connected) and asserts private defaults
+# (_database_url/_task_timeout/_max_task_age); there is no public API for
+# these, so the private-usage diagnostic is disabled for this file only
+# (the Pylance equivalent of the "# pylint: disable=protected-access"
+# comment used in sibling test files).
+
 """
 Unit tests for TaskQueue (conductor/core/queue.py).
 
@@ -26,8 +34,8 @@ from conductor.exceptions import TaskError
 # ===================================================================
 
 
-@pytest.fixture
-def mock_pool() -> MagicMock:
+@pytest.fixture(name="mock_pool")
+def _mock_pool_factory() -> MagicMock:
     """Create a mock DatabasePool."""
     pool = MagicMock()
     pool.is_connected = True
@@ -55,8 +63,8 @@ def mock_pool() -> MagicMock:
     return pool
 
 
-@pytest.fixture
-def mock_queries() -> MagicMock:
+@pytest.fixture(name="mock_queries")
+def _mock_queries_factory() -> MagicMock:
     """Create a mock QueryBuilder with all needed methods."""
     q = MagicMock()
     q.insert_task = AsyncMock()
@@ -65,6 +73,7 @@ def mock_queries() -> MagicMock:
     q.select_tasks_by_status = AsyncMock()
     q.count_tasks_by_status = AsyncMock()
     q.cancel_task = AsyncMock()
+    q.mark_dependents_blocked = AsyncMock()
     q.insert_recurring_task = AsyncMock()
     q.select_recurring_task = AsyncMock()
     q.select_recurring_tasks = AsyncMock()
@@ -73,8 +82,8 @@ def mock_queries() -> MagicMock:
     return q
 
 
-@pytest.fixture
-def queue(mock_pool: Any, mock_queries: Any) -> TaskQueue:
+@pytest.fixture(name="queue")
+def _queue_factory(mock_pool: Any, mock_queries: Any) -> TaskQueue:
     """Create a TaskQueue with mocked internals."""
     q = TaskQueue(database_url="postgresql://mock@localhost/db")
     # Replace internal components with mocks
@@ -229,6 +238,33 @@ class TestSubmit:
         call_kwargs = mock_queries.insert_task.call_args[0][0]
         assert call_kwargs["route"] == "critical"
         assert call_kwargs["priority"] == 50
+
+    @pytest.mark.asyncio
+    async def test_submit_with_depends_on(self, queue: Any, mock_queries: Any) -> None:
+        """``depends_on`` should be passed through to the insert dict."""
+        mock_queries.insert_task.return_value = "tid-dep"
+
+        await queue.submit("test", {}, depends_on=["dep-a", "dep-b"])
+
+        call_kwargs = mock_queries.insert_task.call_args[0][0]
+        assert call_kwargs["depends_on"] == ["dep-a", "dep-b"]
+
+    @pytest.mark.asyncio
+    async def test_submit_invalid_depends_on(self, queue: Any) -> None:
+        """Malformed ``depends_on`` should raise ValueError up-front."""
+        with pytest.raises(ValueError, match="depends_on"):
+            await queue.submit("test", {}, depends_on="not-a-list")
+        with pytest.raises(ValueError, match="depends_on"):
+            await queue.submit("test", {}, depends_on=[""])
+        with pytest.raises(ValueError, match="depends_on"):
+            await queue.submit("test", {}, depends_on=[123])
+
+    @pytest.mark.asyncio
+    async def test_submit_depends_on_self_reference(self, queue: Any, mock_queries: Any) -> None:
+        """A task cannot depend on itself."""
+        mock_queries.insert_task.return_value = "self"
+        with pytest.raises(ValueError, match="cannot depend on itself"):
+            await queue.submit("test", {}, depends_on=["self"], task_id="self")
 
     @pytest.mark.asyncio
     async def test_submit_priority_above_max(self, queue: Any) -> None:
@@ -703,8 +739,6 @@ class TestTaskToDbDict:
 
     def test_round_trip(self) -> None:
         """A Task -> _task_to_db_dict -> Task.from_dict should round-trip."""
-        from conductor.core.queue import _task_to_db_dict
-
         original = Task(
             task_id="tid-rt",
             task_type="roundtrip",

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Extract the release notes for the current tag from ``CHANGELOG.md``.
 
-Reads the ``GITHUB_REF_NAME`` environment variable (e.g. ``v0.1.0``) and
+Reads the ``GITHUB_REF_NAME`` environment variable (e.g. ``v0.2.0``) and
 writes the matching ``## [X.Y.Z]`` section to ``release_body.md``.  Falls
 back to the whole changelog if the version section is not found.
 
@@ -25,7 +25,7 @@ def extract_section(changelog: str, version: str) -> str:
 
 
 def main() -> int:
-    tag = os.environ.get("GITHUB_REF_NAME", "v0.1.0")
+    tag = os.environ.get("GITHUB_REF_NAME", "v0.2.0")
     version = tag[1:] if tag.startswith("v") else tag
     changelog_path = pathlib.Path("CHANGELOG.md")
     if not changelog_path.exists():

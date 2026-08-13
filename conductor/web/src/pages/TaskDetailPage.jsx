@@ -46,6 +46,20 @@ export default function TaskDetailPage() {
             <dd>{data.task_type}</dd>
             <dt>Route</dt>
             <dd>{data.route}</dd>
+            <dt>Depends on</dt>
+            <dd>
+              {data.depends_on && data.depends_on.length > 0 ? (
+                data.depends_on.map((dep) => (
+                  <div key={dep}>
+                    <Link to={`/tasks/${dep}`} className="mono">
+                      {dep.slice(0, 8)}
+                    </Link>
+                  </div>
+                ))
+              ) : (
+                "—"
+              )}
+            </dd>
             <dt>Priority</dt>
             <dd>{data.priority}</dd>
             <dt>Attempt</dt>

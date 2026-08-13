@@ -66,6 +66,22 @@ def _validate_route(route: str) -> None:
         raise ValueError("route must be a non-empty string")
 
 
+def _validate_depends_on(depends_on: Optional[list[str]]) -> None:
+    """Validate a ``depends_on`` list of task IDs.
+
+    Raises:
+        ValueError: If ``depends_on`` is not a list of non-empty strings
+            (``None`` is allowed).
+    """
+    if depends_on is None:
+        return
+    if not isinstance(depends_on, list):
+        raise ValueError("depends_on must be a list of task IDs")
+    for dep in depends_on:
+        if not isinstance(dep, str) or not dep.strip():
+            raise ValueError("depends_on must contain only non-empty task ID strings")
+
+
 class TaskQueue:
     """High-level interface for submitting and querying tasks.
 
@@ -164,6 +180,7 @@ class TaskQueue:
         scheduled_for: Optional[datetime] = None,
         route: str = "default",
         priority: int = 0,
+        depends_on: Optional[list[str]] = None,
         task_id: Optional[str] = None,
     ) -> str:
         """Submit a new task to the queue.
@@ -175,13 +192,16 @@ class TaskQueue:
             scheduled_for: If set, the task won't be picked up before this time.
             route: Route name for selective worker polling (v0.2).
             priority: Task priority, higher = more urgent (v0.2).
+            depends_on: Task IDs that must complete (or be cancelled) before
+                this task may run (v0.2).  Forward references are allowed.
             task_id: Optional explicit task ID (auto-generated if omitted).
 
         Returns:
             The unique task ID.
 
         Raises:
-            ValueError: If ``task_type`` is empty or ``payload`` is not a dict.
+            ValueError: If ``task_type`` is empty, ``payload`` is not a dict,
+                ``depends_on`` is malformed, or the task depends on itself.
             TaskError: If the task already exists or insertion fails.
         """
         self._require_connected()
@@ -192,11 +212,14 @@ class TaskQueue:
             raise ValueError("payload must be a dict")
         _validate_route(route)
         _validate_priority(priority)
+        _validate_depends_on(depends_on)
 
         rp = retry_policy or RetryPolicy()
         rp.validate()
 
         tid = task_id or generate_task_id()
+        if depends_on and tid in depends_on:
+            raise ValueError("a task cannot depend on itself")
 
         task = Task(
             task_id=tid,
@@ -205,6 +228,7 @@ class TaskQueue:
             status=TaskStatus.PENDING,
             priority=priority,
             route=route,
+            depends_on=depends_on or [],
             retry_policy=rp,
             attempt=0,
             max_retries=rp.max_retries,
@@ -826,6 +850,7 @@ def _task_to_db_dict(task: Task) -> dict[str, Any]:
         "status": task.status.value,
         "priority": task.priority,
         "route": task.route,
+        "depends_on": list(task.depends_on),
         "attempt": task.attempt,
         "max_retries": task.max_retries,
         "retry_policy": task.retry_policy.to_dict(),

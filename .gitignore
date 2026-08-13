@@ -3,6 +3,11 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 dist/
+# The web dashboard build output (conductor/web/dist) IS tracked and shipped in
+# the wheel via package-data "web/dist/**", so re-include it here.  The nested
+# conductor/web/.gitignore still excludes node_modules/ and dist/.vite/.
+!conductor/web/dist/
+!conductor/web/dist/**
 build/
 *.egg
 *.so

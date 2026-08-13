@@ -28,5 +28,9 @@ class RetryPolicyError(ConductorException):
     """Raised when a retry policy is invalid or cannot be applied."""
 
 
+class CircuitBreakerError(ConductorException):
+    """Raised when circuit-breaker configuration is invalid."""
+
+
 class ConductorConnectionError(ConductorException):
     """Raised when a database connection cannot be established."""

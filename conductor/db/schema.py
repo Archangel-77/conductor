@@ -19,7 +19,7 @@ logger = logging.getLogger("conductor.db.schema")
 # Version tracking
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 """The current schema version expected by this code."""
 
 CREATE_VERSION_TABLE = """
@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS conductor_tasks (
     attempt         INTEGER     NOT NULL DEFAULT 0,
     max_retries     INTEGER     NOT NULL DEFAULT 3,
     retry_policy    JSONB       NOT NULL DEFAULT '{}',
+    depends_on      TEXT[]      NOT NULL DEFAULT '{}',
     scheduled_for   TIMESTAMPTZ,
     worker_id       TEXT,
     result          JSONB,
@@ -57,7 +58,7 @@ CREATE TABLE IF NOT EXISTS conductor_tasks (
     CONSTRAINT chk_task_status CHECK (
         status IN (
             'pending', 'processing', 'completed', 'failed', 'retrying',
-            'cancelled'
+            'cancelled', 'blocked'
         )
     ),
     CONSTRAINT chk_task_priority CHECK (priority >= -100 AND priority <= 100),
@@ -113,6 +114,7 @@ CREATE TABLE IF NOT EXISTS conductor_dead_letter (
     retry_policy    JSONB       NOT NULL DEFAULT '{}',
     route           TEXT        NOT NULL DEFAULT 'default',
     priority        INTEGER     NOT NULL DEFAULT 0,
+    depends_on      TEXT[]      NOT NULL DEFAULT '{}',
     moved_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     discarded       BOOLEAN     NOT NULL DEFAULT FALSE,
     discard_reason  TEXT,
@@ -182,6 +184,27 @@ MIGRATE_V3_TO_V4_SQL = [
 ]
 
 # ---------------------------------------------------------------------------
+# v4 → v5 migration
+# ---------------------------------------------------------------------------
+
+# Task dependencies: ``depends_on`` array column on tasks + dead-letter
+# (preserved across DLQ retries, like route/priority in v2), a GIN index for
+# dependency lookups, and the new ``blocked`` task status.  ``DROP CONSTRAINT``
+# is idempotent; re-adding it with ``blocked`` keeps the CHECK up to date.
+MIGRATE_V4_TO_V5_SQL = [
+    "ALTER TABLE conductor_tasks "
+    "ADD COLUMN IF NOT EXISTS depends_on TEXT[] NOT NULL DEFAULT '{}';",
+    "CREATE INDEX IF NOT EXISTS idx_tasks_depends_on" " ON conductor_tasks USING GIN (depends_on);",
+    "ALTER TABLE conductor_dead_letter "
+    "ADD COLUMN IF NOT EXISTS depends_on TEXT[] NOT NULL DEFAULT '{}';",
+    "ALTER TABLE conductor_tasks DROP CONSTRAINT chk_task_status;",
+    "ALTER TABLE conductor_tasks ADD CONSTRAINT chk_task_status CHECK ("
+    " status IN ('pending', 'processing', 'completed', 'failed', 'retrying',"
+    " 'cancelled', 'blocked')"
+    ");",
+]
+
+# ---------------------------------------------------------------------------
 # Indexes
 # ---------------------------------------------------------------------------
 
@@ -193,6 +216,11 @@ TASK_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_tasks_created_at" " ON conductor_tasks (created_at);",
     "CREATE INDEX IF NOT EXISTS idx_tasks_scheduled_for" " ON conductor_tasks (scheduled_for);",
     "CREATE INDEX IF NOT EXISTS idx_tasks_worker_id" " ON conductor_tasks (worker_id);",
+    # GIN index for dependency containment lookups (``depends_on @> ARRAY[...]``)
+    (
+        "CREATE INDEX IF NOT EXISTS idx_tasks_depends_on"
+        " ON conductor_tasks USING GIN (depends_on);"
+    ),
     # Composite index used by the polling query
     (
         "CREATE INDEX IF NOT EXISTS idx_tasks_polling"
@@ -419,6 +447,27 @@ class SchemaManager:
 
         logger.info("Migration v3 → v4 completed successfully.")
 
+    async def _migrate_v4_to_v5(self) -> None:
+        """Run the v4 → v5 migration (``depends_on`` + ``blocked`` status).
+
+        Adds the ``depends_on`` array column to the tasks and dead-letter
+        tables, creates a GIN index for dependency lookups, and rebuilds
+        ``chk_task_status`` to allow the new ``blocked`` status.
+        """
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                for stmt in MIGRATE_V4_TO_V5_SQL:
+                    await conn.execute(stmt)
+
+                # Record version
+                await conn.execute(
+                    "INSERT INTO conductor_version (version) VALUES ($1) "
+                    "ON CONFLICT (version) DO NOTHING",
+                    5,
+                )
+
+        logger.info("Migration v4 → v5 completed successfully.")
+
     async def _run_migration(self, target_version: int) -> None:
         """Run the single migration step that lands on *target_version*.
 
@@ -433,5 +482,7 @@ class SchemaManager:
             await self._migrate_v2_to_v3()
         elif target_version == 4:
             await self._migrate_v3_to_v4()
+        elif target_version == 5:
+            await self._migrate_v4_to_v5()
         else:
             raise ConductorException(f"No migration defined for schema v{target_version}.")

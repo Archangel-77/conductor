@@ -217,7 +217,9 @@ class DatabasePool:
 
         try:
             async with self._pool.acquire(timeout=self._config.timeout) as conn:
-                yield conn
+                # asyncpg yields a ``PoolConnectionProxy`` here; cast it to the
+                # public ``Connection`` type the generator is annotated with.
+                yield cast(asyncpg.Connection, conn)
         except asyncpg.PostgresError as exc:
             raise DatabaseError(f"Failed to acquire connection: {exc}") from exc
         except asyncio.TimeoutError as exc:

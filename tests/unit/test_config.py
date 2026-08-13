@@ -30,6 +30,10 @@ _ENV_VARS = [
     "METRICS_PORT",
     "METRICS_ENABLED",
     "HEALTH_ENABLED",
+    "CONDUCTOR_CIRCUIT_BREAKER_ENABLED",
+    "CONDUCTOR_CIRCUIT_BREAKER_THRESHOLD",
+    "CONDUCTOR_CIRCUIT_BREAKER_TIMEOUT",
+    "CONDUCTOR_CIRCUIT_BREAKER_HALF_OPEN_ATTEMPTS",
     "CONDUCTOR_HANDLERS_MODULE",
 ]
 
@@ -63,6 +67,10 @@ class TestFromEnv:
         assert s.metrics_port == 8000
         assert s.metrics_enabled is True
         assert s.health_enabled is True
+        assert s.circuit_breaker_enabled is False
+        assert s.circuit_breaker_threshold == 5
+        assert s.circuit_breaker_timeout == 60.0
+        assert s.circuit_breaker_half_open_attempts == 2
         assert s.handlers_module is None
 
     def test_type_coercion(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -119,6 +127,19 @@ class TestFromEnv:
         s = WorkerSettings.from_env()
         assert s.log_level == "DEBUG"
 
+    def test_circuit_breaker_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _unset_all(monkeypatch)
+        monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@h/db")
+        monkeypatch.setenv("CONDUCTOR_CIRCUIT_BREAKER_ENABLED", "true")
+        monkeypatch.setenv("CONDUCTOR_CIRCUIT_BREAKER_THRESHOLD", "3")
+        monkeypatch.setenv("CONDUCTOR_CIRCUIT_BREAKER_TIMEOUT", "2.5")
+        monkeypatch.setenv("CONDUCTOR_CIRCUIT_BREAKER_HALF_OPEN_ATTEMPTS", "4")
+        s = WorkerSettings.from_env()
+        assert s.circuit_breaker_enabled is True
+        assert s.circuit_breaker_threshold == 3
+        assert s.circuit_breaker_timeout == 2.5
+        assert s.circuit_breaker_half_open_attempts == 4
+
 
 class TestBuildWorker:
     """Verify build_worker produces a configured Worker."""
@@ -134,6 +155,19 @@ class TestBuildWorker:
         assert w.worker_id == "build-test"
         assert w._concurrency == 4
         assert w._routes == ["a", "b"]
+        assert w._circuit_breaker_registry is None
+
+    def test_build_worker_circuit_breaker(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _unset_all(monkeypatch)
+        monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@h/db")
+        monkeypatch.setenv("CONDUCTOR_CIRCUIT_BREAKER_ENABLED", "true")
+        monkeypatch.setenv("CONDUCTOR_CIRCUIT_BREAKER_THRESHOLD", "3")
+        s = WorkerSettings.from_env()
+        w = s.build_worker()
+        assert w._circuit_breaker_enabled is True
+        assert w._circuit_breaker_registry is not None
+        assert w._circuit_breaker_registry.enabled is True
+        assert w._circuit_breaker_config.threshold == 3
 
     def test_to_dict(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _unset_all(monkeypatch)

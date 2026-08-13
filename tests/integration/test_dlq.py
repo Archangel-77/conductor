@@ -83,6 +83,7 @@ async def _insert_failed_task(
     max_retries: int = 0,
     route: str = "default",
     priority: int = 0,
+    depends_on: list[str] | None = None,
 ) -> None:
     """Insert a failed task into both conductor_tasks and conductor_dead_letter."""
     now = utc_now()
@@ -95,6 +96,7 @@ async def _insert_failed_task(
             "status": "failed",
             "priority": priority,
             "route": route,
+            "depends_on": depends_on or [],
             "attempt": attempts,
             "max_retries": max_retries,
             "retry_policy": rp.to_dict(),
@@ -117,6 +119,7 @@ async def _insert_failed_task(
             "retry_policy": rp.to_dict(),
             "route": route,
             "priority": priority,
+            "depends_on": depends_on or [],
             "moved_at": now,
         }
     )
@@ -322,3 +325,33 @@ class TestDeadLetterQueue:
         assert task_row is not None
         assert task_row["route"] == "batch"
         assert task_row["priority"] == -10
+
+    async def test_retry_preserves_depends_on(self, dlq: Any) -> None:
+        """Retrying from the DLQ should keep the task's ``depends_on``."""
+        task_id = generate_task_id()
+        dep_id = generate_task_id()
+        await _insert_failed_task(dlq, task_id, depends_on=[dep_id])
+
+        await dlq.retry_task(task_id)
+
+        task_row = await dlq._query.select_task(task_id)
+        assert task_row is not None
+        assert task_row["depends_on"] == [dep_id]
+
+    async def test_retry_reinsert_preserves_depends_on(self, dlq: Any) -> None:
+        """Retrying a hard-deleted task re-inserts with stored ``depends_on``."""
+        task_id = generate_task_id()
+        dep_id = generate_task_id()
+        await _insert_failed_task(dlq, task_id, depends_on=[dep_id])
+
+        # Simulate the task row being cascade-deleted
+        await dlq._pool.execute(
+            "DELETE FROM conductor_tasks WHERE task_id = $1",
+            task_id,
+        )
+
+        await dlq.retry_task(task_id)
+
+        task_row = await dlq._query.select_task(task_id)
+        assert task_row is not None
+        assert task_row["depends_on"] == [dep_id]

@@ -1,7 +1,7 @@
 # Conductor Development TODO
 
 **Project**: Lightweight async task queue for Python (PostgreSQL-backed, no Redis)  
-**Version**: 0.1.0 MVP  
+**Version**: 0.2.0  
 **Timeline**: ~6 weeks (6 sprints)  
 **Last Updated**: 2025-01-15
 
@@ -984,31 +984,49 @@
 
 ---
 
-### Sprint 5: Circuit Breaker (Week 8-9)
+### Sprint 5: Circuit Breaker (Week 8-9) ✅
 
 #### Circuit Breaker Pattern
-- [ ] Add circuit breaker state tracking
-- [ ] Track failures per task_type
-- [ ] Transition states: Closed → Open → Half-Open → Closed
-- [ ] Configuration: threshold, timeout, half_open_attempts
-- [ ] Reject new submissions when Open
-- [ ] Update worker to respect circuit state
-- [ ] Write comprehensive tests
-- [ ] Update documentation with circuit breaker examples
+- [x] Create `conductor/circuit_breaker/` module (`CircuitState`, `CircuitBreakerConfig`, `CircuitBreaker`, `CircuitBreakerRegistry`)
+- [x] Track consecutive failures per task_type
+- [x] Transition states: Closed → Open → Half-Open → Closed (probe success closes; all probes failing re-opens)
+- [x] Configuration: threshold, timeout, half_open_attempts (`CircuitBreakerConfig` + `CONDUCTOR_CIRCUIT_BREAKER_*` env)
+- [x] Worker skips execution of open task types (tasks stay pending — "reject" enforced at execution layer)
+- [x] Update worker to respect circuit state (`Worker(circuit_breaker_*)`; `_execute_task` hooks; `get_status()` reports breaker state)
+- [x] Observability: `conductor_tasks_rejected_total` counter + `conductor_circuit_breaker_open` gauge
+- [x] Write comprehensive tests (unit state machine `test_circuit_breaker.py` + live `TestCircuitBreaker` integration + config + metrics)
+- [x] Update documentation with circuit breaker examples (`docs/api-reference.md` section, `examples/10_circuit_breaker.py`)
+
+**Decisions (Sprint 5):**
+- Breaker is **worker-side and in-memory** — per-worker consecutive failures; state is **not shared**
+  across workers (DB-backed registry = future schema v5). "Reject when open" is enforced at execution.
+- When OPEN the worker **skips & leaves pending** — no false failures/retries/DLQ.
+- Only **real handler exceptions** trip the breaker; missing-handler errors do not.
+- Global defaults via `WorkerSettings`/env (`CONDUCTOR_CIRCUIT_BREAKER_*`); per-task-type
+  `circuit_breaker_overrides` are programmatic only.
 
 ---
 
-### Sprint 6: Task Dependencies (Week 9-10)
+### Sprint 6: Task Dependencies (Week 9-10) ✅
 
 #### Dependency Tracking
-- [ ] Add `depends_on` array column to `conductor_tasks`
-- [ ] Update task submission to accept `depends_on` parameter
-- [ ] Create dependency resolution logic
-- [ ] Mark task as "blocked" if dependency fails
-- [ ] Update polling query to filter unmet dependencies
-- [ ] Handle transitive dependencies
-- [ ] Write comprehensive tests
-- [ ] Update documentation with chaining examples
+- [x] Add `depends_on` array column to `conductor_tasks` (+ GIN index; schema **v5**)
+- [x] Update task submission to accept `depends_on` parameter (`submit(depends_on=[...])`; self-reference rejected)
+- [x] Create dependency resolution logic (poll filter excludes unmet deps; satisfied = `completed`/`cancelled`)
+- [x] Mark task as "blocked" if dependency fails (`TaskStatus.BLOCKED`, `dependency '<id>' failed`, terminal, no retry)
+- [x] Update polling query to filter unmet dependencies (both route/no-route branches)
+- [x] Handle transitive dependencies (A → B → C; worker propagates `blocked` transitively)
+- [x] Preserve `depends_on` through DLQ retries (dead-letter column + re-insert branch)
+- [x] Dashboard: task-detail `depends_on` + `blocked` status (badge/filter); rebuilt `dist/`
+- [x] Write comprehensive tests (schema v5 migration, unit, live worker integration, DLQ, e2e)
+- [x] Update documentation with chaining examples (`docs/api-reference.md` section, `examples/11_task_chaining.py`)
+
+**Decisions (Sprint 6):**
+- A dependency is satisfied when `completed` or `cancelled` (cancelled releases dependents).
+- Waiting-for-deps stays `pending` (poll-excluded); a **failed** dependency marks dependents `BLOCKED` (visible state).
+- Failure propagation is **transitive**, driven by the worker's terminal failure path (covers gRPC `persist=true`).
+- Forward references allowed; self-references rejected. Full DAG cycle detection deferred (bounded loop + pending-only filter).
+- `submit_many` unchanged — `submit(depends_on=...)` is the chaining primitive.
 
 ---
 
@@ -1058,7 +1076,7 @@
 - [ ] Web dashboard (v0.2)
 - [ ] gRPC API (v0.2)
 - [ ] Circuit breaker (v0.2)
-- [ ] Task dependencies (v0.2)
+- [x] Task dependencies (v0.2)
 - [ ] Scheduled/recurring tasks (v0.2)
 - [ ] Multi-database support (v0.3)
 - [ ] Distributed tracing (v0.3)

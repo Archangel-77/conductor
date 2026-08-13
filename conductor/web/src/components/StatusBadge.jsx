@@ -5,6 +5,7 @@ const COLORS = {
   failed: "#ef4444",
   retrying: "#8b5cf6",
   cancelled: "#6b7280",
+  blocked: "#64748b",
 };
 
 export default function StatusBadge({ status }) {

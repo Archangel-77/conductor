@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-13
+
 ### Added
 
 - **Task routing** — tasks are submitted with a `route` (default `"default"`);
@@ -79,6 +81,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Dependencies** — `fastapi>=0.110`, `uvicorn>=0.29` (runtime); `httpx`
   (dev).
 - **Example** — `examples/9_web_dashboard.py` (standalone dashboard server).
+- **Circuit breaker** — a per-task-type, worker-side in-memory breaker
+  (`conductor/circuit_breaker/`) that tracks *consecutive* failures: after
+  `threshold` failures the circuit trips `CLOSED → OPEN` and the worker
+  **skips** execution of that type (tasks stay pending — no false
+  failures/DLQ); after `timeout` it becomes `HALF_OPEN` and allows
+  `half_open_attempts` probe executions — a probe success closes the circuit,
+  all probes failing re-opens it.
+- **Models** — `CircuitState` enum, `CircuitBreakerConfig` (frozen dataclass,
+  validates via `CircuitBreakerError`), `CircuitBreaker` (state machine with
+  injectable clock), `CircuitBreakerRegistry` (per-task-type, with overrides).
+- **Worker integration** — `Worker(circuit_breaker_enabled,
+  circuit_breaker_config, circuit_breaker_overrides)`; `_execute_task` skips
+  open types and records success/failure; `get_status()` reports
+  `circuit_breaker_enabled` and `circuit_breaker_open`.
+- **Metrics** — `conductor_tasks_rejected_total{task_type=...}` counter and
+  `conductor_circuit_breaker_open{task_type=...}` gauge.
+- **Config** — `CONDUCTOR_CIRCUIT_BREAKER_ENABLED` / `_THRESHOLD` / `_TIMEOUT` /
+  `_HALF_OPEN_ATTEMPTS` env vars; `WorkerSettings` fields; `.env.example`.
+- **Example** — `examples/10_circuit_breaker.py` (breaker trip → skip →
+  recovery).
+- **Task dependencies & chaining** — `TaskQueue.submit(..., depends_on=[...])`
+  lets a task reference prerequisite task IDs; the polling query excludes
+  tasks with unmet dependencies (they stay pending) until each dependency is
+  `completed`/`cancelled`.
+- **`TaskStatus.BLOCKED`** — when a dependency fails, its pending dependents
+  are marked `blocked` (`dependency '<id>' failed`, terminal, no retry),
+  propagating **transitively** (A→B→C) from the worker's failure path.
+- **Schema v5** — `depends_on TEXT[]` column on `conductor_tasks` +
+  `conductor_dead_letter`, GIN index `idx_tasks_depends_on`, and `blocked`
+  added to `chk_task_status`; `SchemaManager` migrates v4 databases.
+- **DLQ preservation** — `depends_on` is stored on the dead-letter table and
+  restored when a task is retried (schema-v2 route/priority precedent).
+- **Dashboard** — task detail shows `depends_on`; `blocked` status filter +
+  badge; rebuilt committed `conductor/web/dist`.
+- **Example** — `examples/11_task_chaining.py` (chained execution + failure
+  propagation).
 
 ## [0.1.0] - 2026-07-31
 
@@ -146,3 +184,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Nothing (no breaking changes in v0.1).
 
 [0.1.0]: https://github.com/Archangel-77/Conductor/releases/tag/v0.1.0
+[0.2.0]: https://github.com/Archangel-77/Conductor/releases/tag/v0.2.0

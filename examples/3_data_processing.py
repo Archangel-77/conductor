@@ -2,9 +2,10 @@
 Example 3 — Multi-step data processing pipeline.
 
 Processes an uploaded file through a pipeline (download -> process ->
-store) and then chains a follow-up notification task. Native task
-chaining is a v0.2 feature; this example shows the manual pattern — a
-handler submits the next task before returning.
+store) and then chains a follow-up notification task. This example uses
+the manual pattern — a handler submits the next task before returning.
+Native dependencies (`depends_on`) are shown in
+``examples/11_task_chaining.py``.
 
 Expected output (paraphrased)::
 

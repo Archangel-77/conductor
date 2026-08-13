@@ -11,6 +11,7 @@ const STATUSES = [
   "failed",
   "retrying",
   "cancelled",
+  "blocked",
 ];
 
 export default function TasksPage() {

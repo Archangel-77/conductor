@@ -24,7 +24,7 @@ import logging
 from typing import Any, Optional
 
 import grpc
-from grpc import aio as grpc_aio
+import grpc.aio as grpc_aio
 
 from conductor.core.models import TaskStatus, generate_task_id
 from conductor.core.worker import Worker, _call_handler
@@ -74,10 +74,12 @@ class ConductorWorkerServicer:
                 error=f"No handler registered for task_type '{task_type}'.",
             )
 
+        # ``context.abort`` never returns (it raises to terminate the RPC), so
+        # ``payload`` is always assigned below; the initial value is only a
+        # safety net for type checkers.
+        payload: dict[str, Any] = {}
         try:
-            payload: dict[str, Any] = (
-                json.loads(request.payload.decode("utf-8")) if request.payload else {}
-            )
+            payload = json.loads(request.payload.decode("utf-8")) if request.payload else {}
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             await context.abort(
                 grpc.StatusCode.INVALID_ARGUMENT,

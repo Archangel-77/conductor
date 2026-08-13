@@ -10,22 +10,26 @@ from typing import Any, Awaitable, Optional
 
 from . import conductor_pb2
 
+
 class ConductorWorkerServicer:
     async def ProcessTask(
         self,
         _request: conductor_pb2.TaskRequest,
         _context: Any,
     ) -> conductor_pb2.TaskResponse: ...
+
     async def RegisterHandler(
         self,
         _request: conductor_pb2.RegisterRequest,
         _context: Any,
     ) -> conductor_pb2.RegisterResponse: ...
+
     async def GetWorkerStatus(
         self,
         _request: conductor_pb2.StatusRequest,
         _context: Any,
     ) -> conductor_pb2.WorkerStatus: ...
+
 
 class ConductorWorkerStub:
     """Client stub. Over a ``grpc.aio`` channel the RPC methods return
@@ -33,6 +37,7 @@ class ConductorWorkerStub:
     """
 
     def __init__(self, _channel: Any) -> None: ...
+
     def ProcessTask(
         self,
         _request: conductor_pb2.TaskRequest,
@@ -43,6 +48,7 @@ class ConductorWorkerStub:
         _wait_for_ready: Optional[bool] = None,
         _compression: Any = None,
     ) -> Awaitable[conductor_pb2.TaskResponse]: ...
+
     def RegisterHandler(
         self,
         _request: conductor_pb2.RegisterRequest,
@@ -53,6 +59,7 @@ class ConductorWorkerStub:
         _wait_for_ready: Optional[bool] = None,
         _compression: Any = None,
     ) -> Awaitable[conductor_pb2.RegisterResponse]: ...
+
     def GetWorkerStatus(
         self,
         _request: conductor_pb2.StatusRequest,
@@ -63,6 +70,7 @@ class ConductorWorkerStub:
         _wait_for_ready: Optional[bool] = None,
         _compression: Any = None,
     ) -> Awaitable[conductor_pb2.WorkerStatus]: ...
+
 
 def add_ConductorWorkerServicer_to_server(
     _servicer: Any,

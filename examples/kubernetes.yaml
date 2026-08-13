@@ -66,7 +66,7 @@ spec:
     spec:
       containers:
         - name: worker
-          image: conductor:0.1.0
+          image: conductor:0.2.0
           imagePullPolicy: IfNotPresent
           ports:
             - name: metrics

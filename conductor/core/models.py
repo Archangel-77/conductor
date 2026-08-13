@@ -32,6 +32,7 @@ class TaskStatus(str, Enum):
     FAILED = "failed"
     RETRYING = "retrying"
     CANCELLED = "cancelled"
+    BLOCKED = "blocked"
 
     def __str__(self) -> str:
         return self.value
@@ -160,6 +161,9 @@ class Task:
 
     route: str = "default"
     """Route name for selective worker polling.  Used in v0.2+."""
+
+    depends_on: list[str] = field(default_factory=list)
+    """Task IDs that must complete before this task may run."""
 
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
     """Retry configuration for this task."""
@@ -342,6 +346,9 @@ class DLQTask:
 
     priority: int = 0
     """Priority the task was submitted with (preserved across DLQ retries)."""
+
+    depends_on: list[str] = field(default_factory=list)
+    """Task IDs the task depended on (preserved across DLQ retries)."""
 
     moved_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     """When the task was moved to the DLQ."""

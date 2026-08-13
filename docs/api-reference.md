@@ -24,7 +24,7 @@ async with TaskQueue(database_url="postgresql://...") as queue:
     task_id = await queue.submit("send_email", {"to": "x@example.com"})
 ```
 
-### `submit(task_type, payload, *, retry_policy=None, scheduled_for=None, route="default", priority=0, task_id=None)`
+### `submit(task_type, payload, *, retry_policy=None, scheduled_for=None, route="default", priority=0, depends_on=None, task_id=None)`
 
 Submit a new task.
 
@@ -34,6 +34,8 @@ Submit a new task.
 - `scheduled_for` (`datetime | None`): earliest pickup time.
 - `route` (`str`, default `"default"`): route name for selective worker polling.
 - `priority` (`int`, default `0`): higher runs first; range **-100..100**.
+- `depends_on` (`list[str] | None`): task IDs that must complete (or be
+  cancelled) before this task runs; forward references are allowed.
 - `task_id` (`str | None`): explicit ID (auto-generated otherwise).
 
 **Returns** `str` — the task ID. **Raises** `ValueError` on bad input,
@@ -118,7 +120,9 @@ routes=None, log_level="INFO", pool_min_size=2, pool_max_size=10,
 pool_timeout=30.0, command_timeout=60.0, heartbeat_interval=10.0,
 graceful_shutdown_timeout=30.0, metrics_port=8000, metrics_enabled=True,
 health_enabled=True, enable_scheduler=False, grpc_port=50051,
-grpc_enabled=False, grpc_max_message_size=None)`
+grpc_enabled=False, grpc_max_message_size=None, api_port=8080,
+api_enabled=False, api_key=None, circuit_breaker_enabled=False,
+circuit_breaker_config=None, circuit_breaker_overrides=None)`
 
 > `routes=None` polls **all** routes (no route filter).  Pass a list such as
 > `routes=["critical"]` to poll only those routes.  The CLI/`ROUTES` env var
@@ -249,7 +253,7 @@ as `success=false` with the error message.
 ### Client example
 
 ```python
-from grpc import aio as grpc_aio
+import grpc.aio as grpc_aio
 from conductor.grpc import conductor_pb2, conductor_pb2_grpc
 
 channel = grpc_aio.insecure_channel("localhost:50051")
@@ -310,19 +314,116 @@ in a cancellable state (`processing`/`completed`/`failed`/`cancelled`). The
 
 ---
 
+## Circuit Breaker
+
+A per-task-type **circuit breaker** protects workers from repeatedly executing
+a handler that keeps failing. It is **worker-side and in-memory** — each
+worker tracks its own *consecutive* failures per task type (state is not
+shared across workers; a DB-backed registry is future work).
+
+Enable it on the worker:
+
+```python
+from conductor import CircuitBreakerConfig, Worker
+
+worker = Worker(
+    database_url="...",
+    circuit_breaker_enabled=True,
+    circuit_breaker_config=CircuitBreakerConfig(
+        threshold=5,              # open after 5 consecutive failures
+        timeout=60.0,             # stay open 60s, then allow half-open probes
+        half_open_attempts=2,     # probe executions allowed while half-open
+    ),
+)
+```
+
+### State machine
+
+- **CLOSED** — normal operation. After `threshold` *consecutive* failures the
+  circuit trips **OPEN**.
+- **OPEN** — the worker **skips** execution of that task type (tasks stay
+  pending — no false failures/retries/DLQ) until `timeout` seconds elapse.
+- **HALF_OPEN** — after the timeout, up to `half_open_attempts` probe
+  executions are allowed. A successful probe closes the circuit; all probes
+  failing re-opens it.
+
+Only real handler exceptions trip the breaker — a task whose handler is not
+registered does **not** count as a circuit failure.
+
+### Models
+
+- `CircuitState` (`(str, Enum)`): `CLOSED`, `OPEN`, `HALF_OPEN`.
+- `CircuitBreakerConfig` (frozen dataclass): `threshold=5`, `timeout=60.0`,
+  `half_open_attempts=2`. Validates via `CircuitBreakerError`;
+  `to_dict()`/`from_dict()`.
+- `CircuitBreaker` — per-type state machine: `allow_request()`,
+  `record_success()`, `record_failure()`, `reset()`, `snapshot()`,
+  `state`/`is_open`.
+- `CircuitBreakerRegistry` — hands out one `CircuitBreaker` per task type;
+  `get(task_type)`, `open_types()`, `snapshot()`, `reset()`.
+
+Per-task-type `circuit_breaker_overrides` are programmatic only; global
+defaults come from the `CONDUCTOR_CIRCUIT_BREAKER_*` env vars (see
+[Configuration](configuration.md)).
+
+### Observability
+
+- `conductor_tasks_rejected_total{task_type=...}` — tasks skipped while open.
+- `conductor_circuit_breaker_open{task_type=...}` — 1 while open/half-open.
+- `Worker.get_status()` reports `circuit_breaker_enabled` and
+  `circuit_breaker_open` (task types currently open/half-open).
+
+---
+
+## Task Dependencies & Chaining
+
+Native task chaining via `TaskQueue.submit(..., depends_on=[...])`: a task
+with dependencies is **not polled** until every dependency is satisfied, so
+chains (A → B → C) run in order automatically.
+
+```python
+a = await queue.submit("download", {"url": "..."})
+b = await queue.submit("process", {}, depends_on=[a])
+c = await queue.submit("publish", {}, depends_on=[b])
+```
+
+### Semantics
+
+- **Gating** — a task whose dependencies are not all in `completed` or
+  `cancelled` is excluded from polling (it stays `pending`). This handles the
+  transient "waiting for dependencies" case.
+- **`BLOCKED`** — when a dependency reaches a terminal failure, its pending
+  dependents are marked `BLOCKED` (error: `dependency '<id>' failed`). This is
+  terminal (no retry) and propagates **transitively**: if A fails and B depends
+  on A and C depends on B, both B and C become `BLOCKED`. It is driven by the
+  worker when a task exhausts its retries (and covers the gRPC `persist=true`
+  path).
+- **Cancelled dependencies** — count as satisfied, so dependents are released
+  to run (a cancelled step does not hang its chain).
+- **Forward references** — you may reference task IDs that don't exist yet; the
+  gating simply keeps the dependent pending until they do. Self-references are
+  rejected at submit time (`ValueError`).
+- **DLQ preservation** — `depends_on` is stored on `conductor_dead_letter` and
+  restored when a task is retried (schema v2 route/priority precedent).
+
+Schema is at **v5** (`depends_on TEXT[]` + GIN index + `blocked` status);
+`SchemaManager.ensure_schema()` migrates v4 databases.
+
+---
+
 ## Models
 
 ### `Task`
 
 Frozen dataclass. Key fields: `task_id`, `task_type`, `payload`, `status`,
-`priority`, `route`, `retry_policy`, `attempt`, `max_retries`,
+`priority`, `route`, `depends_on`, `retry_policy`, `attempt`, `max_retries`,
 `scheduled_for`, `worker_id`, `result`, `error_message`, `created_at`,
 `started_at`, `completed_at`. Supports `to_dict()` / `from_dict()`.
 
 ### `TaskStatus`
 
 `(str, Enum)`: `PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`, `RETRYING`,
-`CANCELLED`.
+`CANCELLED`, `BLOCKED`.
 
 ### `RetryPolicy`
 
@@ -333,8 +434,8 @@ Frozen dataclass: `max_retries=3`, `backoff_strategy="exponential"`,
 ### `DLQTask`
 
 Frozen dataclass: `task_id`, `task_type`, `payload`, `error_message`,
-`attempts`, `retry_policy`, `route`, `priority`, `moved_at`, `discarded`,
-`discard_reason`, `discarded_at`. `to_dict()` / `from_dict()`.
+`attempts`, `retry_policy`, `route`, `priority`, `depends_on`, `moved_at`,
+`discarded`, `discard_reason`, `discarded_at`. `to_dict()` / `from_dict()`.
 
 The `route`/`priority` fields preserve how the task was submitted so that
 `retry_task()` restores it to the correct route and priority.

@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
-from grpc import aio as grpc_aio
+import grpc.aio as grpc_aio
 
 from conductor.core.worker import Worker
 from conductor.exceptions import ConductorConnectionError

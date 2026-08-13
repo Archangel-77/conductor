@@ -32,7 +32,15 @@ def _validate_not_empty(value: Any, name: str) -> None:
 
 
 def _validate_task_status(status: str) -> None:
-    valid = {"pending", "processing", "completed", "failed", "retrying", "cancelled"}
+    valid = {
+        "pending",
+        "processing",
+        "completed",
+        "failed",
+        "retrying",
+        "cancelled",
+        "blocked",
+    }
     if status not in valid:
         raise ValueError(f"Invalid task status '{status}'. Must be one of {valid}")
 
@@ -101,14 +109,14 @@ class QueryBuilder:
         query = """
             INSERT INTO conductor_tasks (
                 task_id, task_type, payload, status, priority, route,
-                attempt, max_retries, retry_policy, scheduled_for,
+                attempt, max_retries, retry_policy, depends_on, scheduled_for,
                 worker_id, result, error_message, created_at,
                 started_at, completed_at
             ) VALUES (
                 $1, $2, $3::jsonb, $4, $5, $6,
-                $7, $8, $9::jsonb, $10,
-                $11, $12::jsonb, $13, $14,
-                $15, $16
+                $7, $8, $9::jsonb, $10, $11,
+                $12, $13::jsonb, $14, $15,
+                $16, $17
             )
             ON CONFLICT (task_id) DO NOTHING
             RETURNING task_id
@@ -126,6 +134,7 @@ class QueryBuilder:
             task.get("attempt", 0),
             task.get("max_retries", 3),
             _json(task.get("retry_policy", {})),
+            task.get("depends_on") or [],
             task.get("scheduled_for"),
             task.get("worker_id"),
             _json(task.get("result")),
@@ -171,9 +180,14 @@ class QueryBuilder:
 
         if route:
             query = """
-                SELECT * FROM conductor_tasks
+                SELECT * FROM conductor_tasks t
                 WHERE status = 'pending'
                   AND (scheduled_for IS NULL OR scheduled_for <= NOW())
+                  AND (COALESCE(cardinality(t.depends_on), 0) = 0 OR NOT EXISTS (
+                      SELECT 1 FROM conductor_tasks d
+                      WHERE d.task_id = ANY(t.depends_on)
+                        AND d.status NOT IN ('completed', 'cancelled')
+                  ))
                   AND route = $3
                 ORDER BY priority DESC, created_at ASC
                 LIMIT $1 OFFSET $2
@@ -182,9 +196,14 @@ class QueryBuilder:
             rows = await self._pool.fetch(query, limit, offset, route)
         else:
             query = """
-                SELECT * FROM conductor_tasks
+                SELECT * FROM conductor_tasks t
                 WHERE status = 'pending'
                   AND (scheduled_for IS NULL OR scheduled_for <= NOW())
+                  AND (COALESCE(cardinality(t.depends_on), 0) = 0 OR NOT EXISTS (
+                      SELECT 1 FROM conductor_tasks d
+                      WHERE d.task_id = ANY(t.depends_on)
+                        AND d.status NOT IN ('completed', 'cancelled')
+                  ))
                 ORDER BY priority DESC, created_at ASC
                 LIMIT $1 OFFSET $2
                 FOR UPDATE SKIP LOCKED
@@ -423,7 +442,7 @@ class QueryBuilder:
             set_parts.append(f"started_at = ${idx}")
             params.append(datetime.now(timezone.utc))
             idx += 1
-        elif new_status in ("completed", "failed"):
+        elif new_status in ("completed", "failed", "blocked"):
             set_parts.append(f"completed_at = ${idx}")
             params.append(datetime.now(timezone.utc))
             idx += 1
@@ -451,6 +470,33 @@ class QueryBuilder:
             task_id,
         )
         return "UPDATE 1" in result_tag
+
+    async def mark_dependents_blocked(
+        self,
+        task_id: str,
+        error_message: str,
+    ) -> list[str]:
+        """Mark pending tasks that depend on *task_id* as ``blocked``.
+
+        Returns the IDs of the tasks that were newly marked (empty when
+        nothing was blocked), so callers can propagate the state
+        transitively — a blocked task's own dependents are marked next.
+
+        Args:
+            task_id: The task that reached a terminal failure.
+            error_message: Message stored on each blocked dependent.
+        """
+        _validate_not_empty(task_id, "task_id")
+
+        rows = await self._pool.fetch(
+            "UPDATE conductor_tasks "
+            "SET status = 'blocked', error_message = $2, completed_at = NOW() "
+            "WHERE status = 'pending' AND depends_on @> ARRAY[$1] "
+            "RETURNING task_id",
+            task_id,
+            error_message,
+        )
+        return [str(r["task_id"]) for r in rows]
 
     async def clear_task_worker_id(self, task_id: str) -> bool:
         """Set ``worker_id`` to ``NULL`` for a task without changing status.
@@ -536,18 +582,19 @@ class QueryBuilder:
         query = """
             INSERT INTO conductor_dead_letter (
                 task_id, task_type, payload, error_message, attempts,
-                retry_policy, route, priority, moved_at, discarded,
+                retry_policy, route, priority, depends_on, moved_at, discarded,
                 discard_reason, discarded_at
             ) VALUES (
                 $1, $2, $3::jsonb, $4, $5,
-                $6::jsonb, $7, $8, $9, $10,
-                $11, $12
+                $6::jsonb, $7, $8, $9, $10, $11,
+                $12, $13
             )
             ON CONFLICT (task_id) DO UPDATE SET
                 error_message = EXCLUDED.error_message,
                 attempts     = EXCLUDED.attempts,
                 route        = EXCLUDED.route,
                 priority     = EXCLUDED.priority,
+                depends_on   = EXCLUDED.depends_on,
                 moved_at     = EXCLUDED.moved_at,
                 discarded    = FALSE,
                 discard_reason = NULL,
@@ -564,6 +611,7 @@ class QueryBuilder:
             _json(dlq.get("retry_policy", {})),
             dlq.get("route", "default"),
             dlq.get("priority", 0),
+            dlq.get("depends_on") or [],
             dlq.get("moved_at", datetime.now(timezone.utc)),
             dlq.get("discarded", False),
             dlq.get("discard_reason"),

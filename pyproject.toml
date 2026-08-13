@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "conductor-task-queue"
-version = "0.1.0"
+version = "0.2.0"
 description = "Lightweight async task queue for Python (PostgreSQL-backed, no Redis)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -98,8 +98,10 @@ exclude = [
 line_length = 100
 target_version = ["py311"]
 # Generated protobuf/gRPC stubs — regenerate via scripts/generate_grpc.py
-# rather than reformatting.
-extend-exclude = "conductor/grpc/conductor_pb2.py|conductor/grpc/conductor_pb2_grpc.py"
+# rather than reformatting. The hand-maintained .pyi stubs use PEP8 spacing
+# (2 blank lines between top-level defs), which black's stub-file mode would
+# collapse to a single blank line, so they are excluded here too.
+extend-exclude = "conductor/grpc/conductor_pb2.py|conductor/grpc/conductor_pb2_grpc.py|conductor/grpc/conductor_pb2.pyi|conductor/grpc/conductor_pb2_grpc.pyi"
 
 [tool.flake8]
 max_line_length = 100

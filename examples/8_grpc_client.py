@@ -24,7 +24,7 @@ import json
 import os
 from typing import Any
 
-from grpc import aio as grpc_aio
+import grpc.aio as grpc_aio
 
 from conductor import Worker
 from conductor.grpc import conductor_pb2, conductor_pb2_grpc
@@ -75,7 +75,7 @@ async def main() -> None:
                 f"handlers={list(status.registered_handlers)}"
             )
         finally:
-            await channel.close()
+            await channel.close(grace=None)
             await worker.shutdown()
             await run_task
 

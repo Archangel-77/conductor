@@ -223,6 +223,7 @@ class DeadLetterQueue:
                 "status": "pending",
                 "priority": dlq_row.get("priority", 0),
                 "route": dlq_row.get("route", "default"),
+                "depends_on": dlq_row.get("depends_on") or [],
                 "attempt": 0,
                 "max_retries": rp.max_retries,
                 "retry_policy": rp.to_dict(),

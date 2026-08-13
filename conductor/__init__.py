@@ -25,6 +25,7 @@ from conductor.db.connection import DatabasePool, PoolConfig
 from conductor.db.queries import QueryBuilder
 from conductor.db.schema import SchemaManager
 from conductor.exceptions import (
+    CircuitBreakerError,
     ConductorConnectionError,
     ConductorException,
     DatabaseError,
@@ -40,6 +41,13 @@ from conductor.dlq.dead_letter_queue import DeadLetterQueue
 from conductor.recurring.scheduler import RecurringScheduler
 from conductor.grpc.server import GrpcWorkerServer
 
+from conductor.circuit_breaker import (
+    CircuitBreaker,
+    CircuitBreakerConfig,
+    CircuitBreakerRegistry,
+    CircuitState,
+)
+
 from conductor.api.server import DashboardServer
 from conductor.api.app import create_app
 
@@ -47,6 +55,11 @@ from conductor.observability.health import HealthChecker, HealthResult, HealthSt
 
 __all__: list[str] = [
     "BackoffStrategyType",
+    "CircuitBreaker",
+    "CircuitBreakerConfig",
+    "CircuitBreakerError",
+    "CircuitBreakerRegistry",
+    "CircuitState",
     "ConductorConnectionError",
     "ConductorException",
     "create_app",

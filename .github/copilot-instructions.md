@@ -1,11 +1,11 @@
 # Conductor — Agent Instructions
 
 ## Project Identity
-- **Package**: `conductor-task-queue` v0.1.0, MIT license, published to PyPI
+- **Package**: `conductor-task-queue` v0.2.0, MIT license, published to PyPI
 - **Python**: 3.11+ only, asyncio-native, **no threads**
 - **Database**: PostgreSQL 12+ only, **no Redis**, no external message brokers
 - **Architecture**: Polling-based task dispatch against PostgreSQL; exactly-once semantics; idempotent task processing
-- **Status**: v0.1.0 released to PyPI (2026-07-31). v0.2 Sprint 1 🔄 Routing & Priority in progress.
+- **Status**: v0.2.0 released to PyPI (2026-08-13). v0.3 planned (webhooks, batch operations, multi-region).
 
 ## Code Style & Formatting
 - **Line length**: 100 characters (enforced by black and flake8)
@@ -113,10 +113,12 @@ Before finishing ANY task (feature, bug fix, refactor, or doc change), the agent
 - **v0.2 Sprint 1**: COMPLETE — Task routing + priority queues (schema v2, DLQ preserves route/priority).
 - **v0.2 Sprint 2**: COMPLETE — Scheduled & recurring (cron) tasks (`RecurringScheduler`, schema v3).
 - **v0.2 Sprint 3**: COMPLETE — gRPC API (polyglot workers).
-- **v0.2 Sprint 4**: IN PROGRESS — Web dashboard (FastAPI + React/Vite; schema v4 `CANCELLED`).
-- **v0.2 Sprint 5+** (planned): Circuit breakers, task chaining.
+- **v0.2 Sprint 4**: COMPLETE — Web dashboard (FastAPI + React/Vite; schema v4 `CANCELLED`).
+- **v0.2 Sprint 5**: COMPLETE — Circuit breaker (worker-side, per-task-type).
+- **v0.2 Sprint 6**: COMPLETE — Task chaining/dependencies (schema v5 `BLOCKED`).
+- **v0.2.0**: RELEASED (2026-08-13) — Sprints 1–6 complete, published to PyPI (`conductor-task-queue`), GitHub Release `v0.2.0`.
 - **v0.3+** (future): webhook callbacks, batch operations, multi-region support.
-- Do **not** implement later v0.2/v0.3 features before the current sprint is complete — follow the plan.
+- Do **not** implement later v0.3 features before the plan calls for them — follow the plan.
 
 ### Codified decisions — v0.2 Sprint 1 (routing & priority)
 - `Worker(routes=None)` (programmatic default) polls **all** routes (no route filter). The CLI / `ROUTES` env var defaults to `["default"]` — this asymmetry is intentional and documented.
@@ -141,4 +143,18 @@ Before finishing ANY task (feature, bug fix, refactor, or doc change), the agent
 - `TaskStatus.CANCELLED` + schema **v4** — the v3→v4 migration rebuilds `chk_task_status` to include `'cancelled'`; `TaskQueue.cancel_task()` cancels pending/retrying only (`TaskError` otherwise); `QueryBuilder.cancel_task()` sets `cancelled` + `completed_at`.
 - The dashboard runs standalone (`conductor api [--host --port --api-key --env-file]`) **or** embedded (`Worker(api_enabled=True)` / `CONDUCTOR_API_ENABLED` / `CONDUCTOR_API_PORT` / `CONDUCTOR_API_KEY`); bind failures are OSError-non-fatal (like metrics/gRPC); `get_status()` reports `api_*`.
 - API key is **optional** (`X-API-Key` header, unset = open); metrics-as-JSON via `prometheus_client.parser.text_string_to_metric_families`; `conductor.observability.metrics` is imported in `app.py` so conductor families are always registered; WebSocket real-time is deferred (polling first).
+
+### Codified decisions — v0.2 Sprint 5 (circuit breaker)
+- The breaker is **worker-side and in-memory** (`conductor/circuit_breaker/`): per-worker consecutive failures per `task_type`; state is **not shared across workers** (a DB-backed registry is future work / schema v5). "Reject when open" is enforced at the execution layer, not at `submit()` time.
+- While OPEN the worker **skips & leaves pending** (no false failures/retries/DLQ). Only **real handler exceptions** trip the breaker — a missing-handler error does not.
+- State machine: CLOSED → (`threshold` consecutive failures) OPEN → (`timeout`) HALF_OPEN (`half_open_attempts` probes) → probe success CLOSED / all probes fail OPEN. The clock is injectable for deterministic tests.
+- Config: global defaults via `WorkerSettings`/env (`CONDUCTOR_CIRCUIT_BREAKER_*`); per-task-type `circuit_breaker_overrides` are programmatic only.
+- Observability: `conductor_tasks_rejected_total` counter + `conductor_circuit_breaker_open` gauge + `Worker.get_status()` (`circuit_breaker_enabled`, `circuit_breaker_open`).
+
+### Codified decisions — v0.2 Sprint 6 (task dependencies)
+- `depends_on` is a `TEXT[]` column (schema **v5**) with a GIN index (`idx_tasks_depends_on`); `conductor_dead_letter` also carries it so a DLQ retry restores dependencies (schema-v2 route/priority precedent). The v4→v5 migration adds the columns, index, and rebuilds `chk_task_status` to include `'blocked'`.
+- A dependency is satisfied when its status is `completed` or `cancelled`; tasks with unmet deps stay `pending` and are excluded by the polling query (`select_pending_tasks`, both route/no-route branches — never relax this).
+- `TaskStatus.BLOCKED` marks dependents of a **failed** dependency (`dependency '<id>' failed`, terminal, no retry); propagation is **transitive** (A→B→C) via the worker's terminal failure path (`_propagate_terminal_dependency`, bounded loop) and covers the gRPC `persist=true` path.
+- `TaskQueue.submit(..., depends_on=[...])` is the chaining primitive (`submit_many` unchanged); forward references are allowed, self-references rejected at submit time. Full DAG cycle detection is future work.
+- Dashboard: task detail exposes `depends_on`; `blocked` is a first-class status (badge + filter).
 

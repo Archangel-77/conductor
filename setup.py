@@ -10,7 +10,7 @@ with open("LICENSE", encoding="utf-8") as f:
 
 setup(
     name="conductor-task-queue",
-    version="0.1.0",
+    version="0.2.0",
     description="Lightweight async task queue for Python (PostgreSQL-backed, no Redis)",
     long_description=long_description,
     long_description_content_type="text/markdown",

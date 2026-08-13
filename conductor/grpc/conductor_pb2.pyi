@@ -9,6 +9,7 @@ and regenerate alongside ``scripts/generate_grpc.py``.
 
 from typing import Any
 
+
 class TaskRequest:
     task_id: str
     task_type: str
@@ -16,6 +17,7 @@ class TaskRequest:
     persist: bool
 
     def __init__(self, **_kwargs: Any) -> None: ...
+
 
 class TaskResponse:
     task_id: str
@@ -25,10 +27,12 @@ class TaskResponse:
 
     def __init__(self, **_kwargs: Any) -> None: ...
 
+
 class RegisterRequest:
     task_type: str
 
     def __init__(self, **_kwargs: Any) -> None: ...
+
 
 class RegisterResponse:
     registered: bool
@@ -37,8 +41,10 @@ class RegisterResponse:
 
     def __init__(self, **_kwargs: Any) -> None: ...
 
+
 class StatusRequest:
     def __init__(self, **_kwargs: Any) -> None: ...
+
 
 class WorkerStatus:
     worker_id: str

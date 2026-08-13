@@ -6,7 +6,7 @@ They are skipped automatically if the database is unreachable.
 """
 
 # pylint: disable=missing-class-docstring,missing-function-docstring
-# pylint: disable=import-outside-toplevel,protected-access
+# pylint: disable=import-outside-toplevel,protected-access,redefined-outer-name,unused-argument
 
 from __future__ import annotations
 
@@ -60,10 +60,10 @@ async def _dashboard_factory() -> Any:
 
     # Wait until uvicorn accepts connections.
     deadline = time.monotonic() + 10
-    async with httpx.AsyncClient(base_url=DASHBOARD_URL) as client:
+    async with httpx.AsyncClient(base_url=DASHBOARD_URL) as http:
         while time.monotonic() < deadline:
             try:
-                resp = await client.get("/api/health")
+                resp = await http.get("/api/health")
                 if resp.status_code == 200:
                     break
             except httpx.ConnectError:

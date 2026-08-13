@@ -123,6 +123,8 @@ class TestMetricsEndpoint:
         assert "conductor_workers_active" in body
         assert "conductor_dlq_size" in body
         assert "conductor_pending_tasks" in body
+        assert "conductor_tasks_rejected_total" in body
+        assert "conductor_circuit_breaker_open" in body
 
     async def test_counter_increments_appear_in_metrics(
         self,

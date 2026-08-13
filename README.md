@@ -387,6 +387,54 @@ which uses the new `CANCELLED` task status (schema v4). The built frontend is
 at install; rebuild with `npm run build` (see `scripts/build_frontend.sh`). See
 ``examples/9_web_dashboard.py``.
 
+### 10. Circuit Breaker
+
+Protect your workers from repeatedly hammering a downstream service that is
+down. Enable a per-task-type **circuit breaker** on the worker:
+
+```python
+from conductor import CircuitBreakerConfig, Worker
+
+worker = Worker(
+    database_url="...",
+    circuit_breaker_enabled=True,
+    circuit_breaker_config=CircuitBreakerConfig(
+        threshold=5,          # open after 5 consecutive failures
+        timeout=60.0,         # stay open 60s before probing
+        half_open_attempts=2, # probe executions allowed while half-open
+    ),
+)
+```
+
+- After `threshold` **consecutive** failures of a `task_type`, the circuit
+  trips **OPEN** — the worker **skips** that type (tasks stay pending, no
+  false failures/retries/DLQ).
+- After `timeout` seconds it becomes **HALF_OPEN** and lets a limited number of
+  probe executions through; a successful probe **closes** the circuit, all
+  probes failing **re-opens** it.
+- Missing-handler errors never trip the breaker — only real handler exceptions.
+- Configurable per worker via `Worker(circuit_breaker_*)` or the
+  `CONDUCTOR_CIRCUIT_BREAKER_*` env vars. See ``examples/10_circuit_breaker.py``.
+
+### 11. Task Dependencies & Chaining
+
+Chain tasks so they run in order automatically — a dependent task isn't picked
+up until its dependencies complete:
+
+```python
+a = await queue.submit("download", {"url": "..."})
+b = await queue.submit("process", {}, depends_on=[a])
+c = await queue.submit("publish", {}, depends_on=[b])
+```
+
+- **Gating** — tasks with unmet dependencies stay `pending` (excluded from
+  polling) until each dependency is `completed` (or `cancelled`).
+- **`BLOCKED`** — when a dependency fails, its dependents are marked `blocked`
+  (`dependency '<id>' failed`), propagating **transitively** (A→B→C).
+- `depends_on` is preserved across DLQ retries (schema **v5**).
+- Forward references are allowed; self-references are rejected. See
+  ``examples/11_task_chaining.py``.
+
 ---
 
 ## Installation
@@ -838,8 +886,8 @@ covered in detail in [docs/deployment.md](docs/deployment.md).
 - **Docker** — a `python:3.11-slim` `Dockerfile` (non-root user, healthcheck
   on `/health`, `ENTRYPOINT ["conductor"] CMD ["worker"]`):
   ```bash
-  docker build -t conductor:0.1.0 .
-  docker run --rm -e DATABASE_URL=postgresql://... -p 8000:8000 conductor:0.1.0
+  docker build -t conductor:0.2.0 .
+  docker run --rm -e DATABASE_URL=postgresql://... -p 8000:8000 conductor:0.2.0
   ```
 - **Docker Compose** — `docker-compose.yml` (dev: PostgreSQL + worker) and
   `docker-compose.prod.yml` (replicas, resource limits, log rotation, nightly

@@ -21,6 +21,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from conductor.circuit_breaker import CircuitBreakerConfig
 from conductor.core.worker import Worker
 from conductor.exceptions import ConductorException
 
@@ -102,6 +103,13 @@ class WorkerSettings:
         api_enabled: Serve the web dashboard (FastAPI + built frontend).
         api_key: Optional API key required by the dashboard ``/api/*``
             endpoints (``X-API-Key`` header).
+        circuit_breaker_enabled: Enable the per-task-type circuit breaker.
+        circuit_breaker_threshold: Consecutive failures before the circuit
+            opens.
+        circuit_breaker_timeout: Seconds the circuit stays open before
+            half-open probes.
+        circuit_breaker_half_open_attempts: Probe executions allowed while
+            half-open.
         handlers_module: Optional dotted path to a module exposing a
             ``register(worker)`` function that attaches task handlers.
     """
@@ -128,6 +136,10 @@ class WorkerSettings:
     api_port: int = 8080
     api_enabled: bool = False
     api_key: Optional[str] = None
+    circuit_breaker_enabled: bool = False
+    circuit_breaker_threshold: int = 5
+    circuit_breaker_timeout: float = 60.0
+    circuit_breaker_half_open_attempts: int = 2
     handlers_module: Optional[str] = None
 
     @classmethod
@@ -166,6 +178,12 @@ class WorkerSettings:
             api_port=_env_int("CONDUCTOR_API_PORT", 8080),
             api_enabled=_env_bool("CONDUCTOR_API_ENABLED", False),
             api_key=os.getenv("CONDUCTOR_API_KEY") or None,
+            circuit_breaker_enabled=_env_bool("CONDUCTOR_CIRCUIT_BREAKER_ENABLED", False),
+            circuit_breaker_threshold=_env_int("CONDUCTOR_CIRCUIT_BREAKER_THRESHOLD", 5),
+            circuit_breaker_timeout=_env_float("CONDUCTOR_CIRCUIT_BREAKER_TIMEOUT", 60.0),
+            circuit_breaker_half_open_attempts=_env_int(
+                "CONDUCTOR_CIRCUIT_BREAKER_HALF_OPEN_ATTEMPTS", 2
+            ),
             handlers_module=os.getenv("CONDUCTOR_HANDLERS_MODULE") or None,
         )
 
@@ -194,6 +212,16 @@ class WorkerSettings:
             api_port=self.api_port,
             api_enabled=self.api_enabled,
             api_key=self.api_key,
+            circuit_breaker_enabled=self.circuit_breaker_enabled,
+            circuit_breaker_config=(
+                CircuitBreakerConfig(
+                    threshold=self.circuit_breaker_threshold,
+                    timeout=self.circuit_breaker_timeout,
+                    half_open_attempts=self.circuit_breaker_half_open_attempts,
+                )
+                if self.circuit_breaker_enabled
+                else None
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -221,5 +249,9 @@ class WorkerSettings:
             "api_port": self.api_port,
             "api_enabled": self.api_enabled,
             "api_key": self.api_key,
+            "circuit_breaker_enabled": self.circuit_breaker_enabled,
+            "circuit_breaker_threshold": self.circuit_breaker_threshold,
+            "circuit_breaker_timeout": self.circuit_breaker_timeout,
+            "circuit_breaker_half_open_attempts": self.circuit_breaker_half_open_attempts,
             "handlers_module": self.handlers_module,
         }

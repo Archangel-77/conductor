@@ -480,8 +480,8 @@ Dependency Graph:
 - 🔲 Scheduled/recurring tasks (cron)
 - ✅ Web dashboard (task monitoring UI)
 - 🔲 gRPC API (for polyglot workers)
-- 🔲 Circuit breaker pattern
-- 🔲 Task dependencies/chaining
+- ✅ Circuit breaker pattern
+- ✅ Task dependencies/chaining
 
 ### Key Features
 
@@ -653,27 +653,46 @@ message TaskResponse {
 ---
 
 #### Feature 6: Circuit Breaker
-**What**: Stop submitting tasks if external service is down
+**What**: Stop executing a task type when the downstream service is failing
 
 **Use Case**:
 ```python
-queue.submit(
-    task_type="call_external_api",
-    payload={"url": "https://api.down.com/data"},
-    circuit_breaker={
-        "threshold": 5,        # Fail 5 times
-        "timeout": 60,         # Then stop for 60s
-        "half_open_attempts": 2
-    }
+from conductor import CircuitBreakerConfig, Worker
+
+worker = Worker(
+    database_url="...",
+    circuit_breaker_enabled=True,
+    circuit_breaker_config=CircuitBreakerConfig(
+        threshold=5,              # Open after 5 consecutive failures
+        timeout=60,               # Stay open 60s, then half-open probes
+        half_open_attempts=2,     # Probe executions allowed while half-open
+    ),
 )
 ```
 
-**Implementation**:
-- Add circuit breaker state tracking (open, closed, half-open)
-- Track failures per task_type
-- Transition to "open" after N failures
-- Attempt recovery after timeout (half-open)
-- Reject new submissions when open
+**Implementation** (Sprint 5):
+- [x] `conductor/circuit_breaker/` module — `CircuitState` enum,
+      `CircuitBreakerConfig` (frozen dataclass), `CircuitBreaker` state
+      machine (injectable clock), `CircuitBreakerRegistry` (per-task-type)
+- [x] Track consecutive failures per task_type; `CLOSED → OPEN` after N failures
+- [x] `OPEN` → worker **skips** execution (tasks stay pending) → `HALF_OPEN`
+      after timeout → probe success `CLOSED` / all probes fail re-`OPEN`
+- [x] Worker integration (`Worker(circuit_breaker_*)`, `_execute_task` hooks,
+      `get_status()` reports breaker state)
+- [x] Metrics (`conductor_tasks_rejected_total`, `conductor_circuit_breaker_open`)
+- [x] Config (`CONDUCTOR_CIRCUIT_BREAKER_*` env vars via `WorkerSettings`)
+- [x] Tests (unit state machine + live worker integration), docs,
+      `examples/10_circuit_breaker.py`
+
+**Decisions (Sprint 5):**
+- The breaker is **worker-side and in-memory** — each worker tracks its own
+  consecutive failures per task type; state is **not shared across workers**
+  (a DB-backed registry is future work). "Reject when open" is enforced at the
+  execution layer (worker skips the type), not at `submit()` time.
+- When OPEN the worker **skips & leaves pending** — no false failures/retries/DLQ.
+- Only **real handler exceptions** trip the breaker; a missing handler does not.
+- Global defaults via `WorkerSettings`/env (`CONDUCTOR_CIRCUIT_BREAKER_*`);
+  per-task-type overrides are programmatic (`circuit_breaker_overrides`).
 
 **Effort**: 1 week
 
@@ -685,24 +704,41 @@ queue.submit(
 **Use Case**:
 ```python
 # Submit task A
-task_a_id = queue.submit(
+task_a_id = await queue.submit(
     task_type="download_file",
     payload={"url": "https://..."}
 )
 
 # Task B depends on A
-queue.submit(
+task_b_id = await queue.submit(
     task_type="process_file",
     payload={"file_id": "123"},
     depends_on=[task_a_id]  # Only run if A succeeds
 )
 ```
 
-**Implementation**:
-- Add `depends_on` (array of task IDs) to tasks table
-- Polling query filters tasks with no unmet dependencies
-- Mark task as "blocked" if dependency fails
-- Transitive dependencies (A → B → C)
+**Implementation** (Sprint 6):
+- [x] `depends_on TEXT[]` column on `conductor_tasks` (+ GIN index) — schema **v5**
+- [x] `TaskQueue.submit(..., depends_on=[...])` + validation (self-reference rejected)
+- [x] Polling query filters tasks with unmet dependencies (deps not `completed`/`cancelled`)
+- [x] `TaskStatus.BLOCKED` — dependents of a failed dependency are marked `blocked`
+      (`dependency '<id>' failed`, terminal, no retry), propagating **transitively**
+- [x] `depends_on` preserved through DLQ retries (dead-letter table column)
+- [x] Dashboard: task-detail `depends_on` + `blocked` status (badge/filter)
+- [x] Tests (schema v5 migration, unit, live worker integration, e2e),
+      docs, `examples/11_task_chaining.py`
+
+**Decisions (Sprint 6):**
+- A dependency is satisfied when its status is `completed` or `cancelled`
+  (a cancelled dependency releases its dependents — chains don't hang).
+- Waiting-for-deps tasks stay `pending` (excluded by the poll filter); a
+  **failed** dependency marks dependents `BLOCKED` (a real, visible state).
+- Failure propagation is **transitive** and driven by the worker's terminal
+  failure path (covers gRPC `persist=true`).
+- Forward references are allowed; self-references rejected at submit time.
+  Full DAG cycle detection is future work (bounded loop + pending-only filter
+  keeps cycles benign).
+- `submit_many` is unchanged — `submit(depends_on=...)` is the chaining primitive.
 
 **Effort**: 1.5 weeks
 
@@ -1195,7 +1231,7 @@ async def test_worker(test_queue):
 #### PyPI Package
 ```
 Package: conductor-task-queue
-Version: 0.1.0
+Version: 0.2.0
 Python: >=3.11
 ```
 
@@ -1203,7 +1239,7 @@ Python: >=3.11
 ```python
 setup(
     name="conductor-task-queue",
-    version="0.1.0",
+    version="0.2.0",
     description="Lightweight async task queue for Python",
     author="Panagiotis Panageas",
     packages=find_packages(),
@@ -1297,7 +1333,7 @@ spec:
     spec:
       containers:
       - name: conductor
-        image: myregistry/conductor:0.1.0
+        image: myregistry/conductor:0.2.0
         env:
         - name: DATABASE_URL
           valueFrom:
@@ -1546,8 +1582,8 @@ class Worker:
 - [x] Scheduled & recurring tasks
 - [x] Web dashboard
 - [x] gRPC API
-- [ ] Circuit breaker
-- [ ] Task dependencies
+- [x] Circuit breaker
+- [x] Task dependencies
 
 ### Phase 3 (v0.3+) – Enterprise
 - [ ] Multi-database support (MySQL, SQLite)

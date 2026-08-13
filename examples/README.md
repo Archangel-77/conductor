@@ -1,6 +1,6 @@
 # Conductor Examples
 
-Eight runnable examples that demonstrate real-world Conductor patterns.
+Eleven runnable examples that demonstrate real-world Conductor patterns.
 Each script is self-contained, uses the public API, and exits cleanly.
 
 | # | File | Demonstrates |
@@ -14,6 +14,8 @@ Each script is self-contained, uses the public API, and exits cleanly.
 | 7 | `7_recurring_tasks.py` | recurring cron tasks (`schedule_recurring` + scheduler) |
 | 8 | `8_grpc_client.py` | gRPC API (`ProcessTask`/`RegisterHandler`/`GetWorkerStatus`) |
 | 9 | `9_web_dashboard.py` | web dashboard (FastAPI API + built React SPA, cancel task) |
+| 10 | `10_circuit_breaker.py` | per-task-type circuit breaker (trip → skip → recover) |
+| 11 | `11_task_chaining.py` | task dependencies (`depends_on`: gate execution, block on failure) |
 
 Polyglot **reference client stubs** (Go/Rust/Node) for the gRPC service live in
 [`grpc/`](grpc/README.md).

@@ -32,7 +32,8 @@ from typing import Any
 import pytest
 import pytest_asyncio
 
-from conductor.core.models import TaskStatus, utc_now
+from conductor.circuit_breaker import CircuitBreakerConfig
+from conductor.core.models import RetryPolicy, TaskStatus, utc_now
 from conductor.core.worker import Worker
 from conductor.exceptions import ConductorConnectionError
 
@@ -397,8 +398,6 @@ class TestTaskExecution:
 
     async def test_execute_handler_not_found(self, task_queue: Any) -> None:
         """A task with no registered handler should fail."""
-        from conductor.core.models import RetryPolicy
-
         task_id = await task_queue.submit(
             "no_handler",
             {},
@@ -422,8 +421,6 @@ class TestTaskExecution:
 
     async def test_execute_handler_raises(self, task_queue: Any) -> None:
         """A handler that raises should result in a failed task."""
-        from conductor.core.models import RetryPolicy
-
         task_id = await task_queue.submit(
             "failing",
             {"message": "boom"},
@@ -516,8 +513,6 @@ class TestRetryAndDLQ:
 
     async def test_task_retried_on_failure(self, task_queue: Any) -> None:
         """A task should be retried if max_retries > 0."""
-        from conductor.core.models import RetryPolicy
-
         rp = RetryPolicy(max_retries=2)
         task_id = await task_queue.submit("retry_me", {}, retry_policy=rp)
 
@@ -549,8 +544,6 @@ class TestRetryAndDLQ:
         task_queue: Any,
     ) -> None:
         """Task should move to DLQ after all retry attempts exhausted."""
-        from conductor.core.models import RetryPolicy
-
         rp = RetryPolicy(max_retries=0)
         task_id = await task_queue.submit("dlq_bound", {}, retry_policy=rp)
 
@@ -581,8 +574,6 @@ class TestRetryAndDLQ:
         task_queue: Any,
     ) -> None:
         """Task with max_retries=0 should go directly to DLQ on failure."""
-        from conductor.core.models import RetryPolicy
-
         rp = RetryPolicy(max_retries=0)
         task_id = await task_queue.submit("no_retry", {}, retry_policy=rp)
 
@@ -918,3 +909,178 @@ class TestRunOnce:
         assert task is not None
         assert task.status == TaskStatus.COMPLETED
         assert task.result == {"processed": 1}
+
+
+class TestCircuitBreaker:
+
+    async def test_circuit_opens_skips_and_recovers(
+        self,
+        task_queue: Any,
+    ) -> None:
+        """A failing task type trips the breaker; tasks are skipped while
+        open, then recover after the timeout via a half-open probe."""
+        state: dict[str, bool] = {"fail": True}
+
+        async with Worker(
+            database_url=_db_url(),
+            worker_id="circuit-breaker-test",
+            pool_min_size=1,
+            pool_max_size=2,
+            pool_timeout=5.0,
+            circuit_breaker_enabled=True,
+            circuit_breaker_config=CircuitBreakerConfig(
+                threshold=2,
+                timeout=0.2,
+                half_open_attempts=1,
+            ),
+        ) as worker:
+
+            @worker.task("cb.task")
+            async def handler(_payload: dict[str, Any]) -> dict[str, Any]:
+                if state["fail"]:
+                    raise ValueError("downstream is down")
+                return {"ok": True}
+
+            # Two failures trip the circuit (threshold=2).
+            await task_queue.submit(
+                "cb.task",
+                {},
+                retry_policy=RetryPolicy(max_retries=0),
+            )
+            await task_queue.submit(
+                "cb.task",
+                {},
+                retry_policy=RetryPolicy(max_retries=0),
+            )
+            await worker.run_once()
+            await worker.run_once()
+
+            status = worker.get_status()
+            assert status["circuit_breaker_enabled"] is True
+            assert "cb.task" in status["circuit_breaker_open"]
+
+            # While open, a new task is skipped and left pending.
+            third = await task_queue.submit(
+                "cb.task",
+                {},
+                retry_policy=RetryPolicy(max_retries=0),
+            )
+            await worker.run_once()
+            task = await task_queue.get_task(third)
+            assert task is not None
+            assert task.status == TaskStatus.PENDING
+
+            # After the timeout, a half-open probe succeeds and closes.
+            state["fail"] = False
+            await asyncio.sleep(0.3)
+            await worker.run_once()
+            task = await task_queue.get_task(third)
+            assert task is not None
+            assert task.status == TaskStatus.COMPLETED
+            assert task.result == {"ok": True}
+
+            assert "cb.task" not in worker.get_status()["circuit_breaker_open"]
+
+
+class TestTaskDependencies:
+
+    async def test_happy_chain(self, task_queue: Any) -> None:
+        """A dependent task runs only after its dependency completes."""
+        async with Worker(
+            database_url=_db_url(),
+            worker_id="chain-happy",
+            pool_min_size=1,
+            pool_max_size=2,
+            pool_timeout=5.0,
+        ) as worker:
+
+            @worker.task("chain.step")
+            async def step(_payload: dict[str, Any]) -> dict[str, Any]:
+                return {"ok": True}
+
+            a = await task_queue.submit("chain.step", {"n": 1})
+            b = await task_queue.submit("chain.step", {"n": 2}, depends_on=[a])
+
+            # First poll: A executes; B is excluded while A is pending.
+            await worker.run_once()
+            task_a = await task_queue.get_task(a)
+            task_b = await task_queue.get_task(b)
+            assert task_a is not None and task_a.status == TaskStatus.COMPLETED
+            assert task_b is not None and task_b.status == TaskStatus.PENDING
+
+            # Second poll: B is now eligible.
+            await worker.run_once()
+            task_b = await task_queue.get_task(b)
+            assert task_b is not None and task_b.status == TaskStatus.COMPLETED
+
+    async def test_failed_dependency_blocks_dependents(
+        self,
+        task_queue: Any,
+    ) -> None:
+        """A failed dependency marks its dependents (transitively) blocked."""
+        state: dict[str, bool] = {"fail": True}
+
+        async with Worker(
+            database_url=_db_url(),
+            worker_id="chain-block",
+            pool_min_size=1,
+            pool_max_size=2,
+            pool_timeout=5.0,
+        ) as worker:
+
+            @worker.task("chain.step")
+            async def step(_payload: dict[str, Any]) -> dict[str, Any]:
+                if state["fail"]:
+                    raise ValueError("boom")
+                return {"ok": True}
+
+            a = await task_queue.submit(
+                "chain.step",
+                {},
+                retry_policy=RetryPolicy(max_retries=0),
+            )
+            b = await task_queue.submit(
+                "chain.step",
+                {},
+                depends_on=[a],
+                retry_policy=RetryPolicy(max_retries=0),
+            )
+            c = await task_queue.submit(
+                "chain.step",
+                {},
+                depends_on=[b],
+                retry_policy=RetryPolicy(max_retries=0),
+            )
+
+            await worker.run_once()
+
+            task_a = await task_queue.get_task(a)
+            task_b = await task_queue.get_task(b)
+            task_c = await task_queue.get_task(c)
+            assert task_a is not None and task_a.status == TaskStatus.FAILED
+            assert task_b is not None and task_b.status == TaskStatus.BLOCKED
+            assert task_b.error_message is not None and "dependency" in task_b.error_message
+            assert task_c is not None and task_c.status == TaskStatus.BLOCKED
+
+    async def test_cancelled_dependency_releases(self, task_queue: Any) -> None:
+        """A cancelled dependency counts as satisfied — dependents can run."""
+        async with Worker(
+            database_url=_db_url(),
+            worker_id="chain-cancel",
+            pool_min_size=1,
+            pool_max_size=2,
+            pool_timeout=5.0,
+        ) as worker:
+
+            @worker.task("chain.step")
+            async def step(_payload: dict[str, Any]) -> dict[str, Any]:
+                return {"ok": True}
+
+            a = await task_queue.submit("chain.step", {"n": 1})
+            b = await task_queue.submit("chain.step", {"n": 2}, depends_on=[a])
+
+            await task_queue.cancel_task(a)
+            await worker.run_once()
+
+            task_b = await task_queue.get_task(b)
+            assert task_b is not None and task_b.status == TaskStatus.COMPLETED
