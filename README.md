@@ -529,7 +529,8 @@ export DATABASE_URL=postgresql://user:password@localhost/conductor
 conductor worker --handlers myapp.handlers
 ```
 
-`python -m conductor worker` is equivalent. See
+`python -m conductor worker` is equivalent. Run `conductor --version` to print
+the installed package version. See
 [docs/installation.md](docs/installation.md) for the handlers-module
 contract.
 

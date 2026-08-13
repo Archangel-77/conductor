@@ -7,6 +7,13 @@ Exposes the public API of the Conductor library.
 
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError, version as _package_version
+
+try:
+    __version__: str = _package_version("conductor-task-queue")
+except PackageNotFoundError:  # pragma: no cover - uninstalled source checkout
+    __version__ = "0.0.0.dev0"
+
 from conductor.core.models import (
     BackoffStrategyType,
     DLQTask,

@@ -35,6 +35,7 @@ from fastapi.staticfiles import StaticFiles
 from prometheus_client import generate_latest
 from prometheus_client.parser import text_string_to_metric_families
 
+from conductor import __version__
 from conductor.api.schemas import (
     CancelResponse,
     DiscardResponse,
@@ -110,7 +111,7 @@ def create_app(
     Returns:
         A configured ``FastAPI`` application.
     """
-    app = FastAPI(title="Conductor Dashboard", version="0.2.0")
+    app = FastAPI(title="Conductor Dashboard", version=__version__)
     auth = _require_api_key(api_key)
 
     # ------------------------------------------------------------------

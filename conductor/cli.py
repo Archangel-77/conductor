@@ -23,6 +23,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
+from conductor import __version__
 from conductor.config import WorkerSettings
 from conductor.core.worker import Worker
 from conductor.exceptions import ConductorException
@@ -35,6 +36,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="conductor",
         description="Lightweight async task queue for Python (PostgreSQL-backed).",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+        help="Show the Conductor version and exit.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 

@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from conductor import __version__
 from conductor.cli import build_parser, main, register_handlers
 from conductor.core.worker import Worker
 from conductor.exceptions import ConductorException
@@ -38,6 +39,14 @@ class TestParser:
         parser = build_parser()
         with pytest.raises(SystemExit):
             parser.parse_args([])
+
+    def test_version_flag(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """`--version` prints the installed version and exits 0."""
+        parser = build_parser()
+        with pytest.raises(SystemExit) as excinfo:
+            parser.parse_args(["--version"])
+        assert excinfo.value.code == 0
+        assert __version__ in capsys.readouterr().out
 
 
 class TestRegisterHandlers:
