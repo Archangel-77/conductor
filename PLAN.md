@@ -475,11 +475,12 @@ Dependency Graph:
 ## Phase 2: v0.2 Advanced Features
 
 ### Goals
-- � Task routing (multiple queues/worker pools) — Sprint 1 in progress
-- 🔄 Priority queues — Sprint 1 in progress
-- 🔲 Scheduled/recurring tasks (cron)
+All Phase 2 features delivered in **v0.2.0** (released 2026-08-13):
+- ✅ Task routing (multiple queues/worker pools)
+- ✅ Priority queues
+- ✅ Scheduled/recurring tasks (cron)
 - ✅ Web dashboard (task monitoring UI)
-- 🔲 gRPC API (for polyglot workers)
+- ✅ gRPC API (for polyglot workers)
 - ✅ Circuit breaker pattern
 - ✅ Task dependencies/chaining
 
@@ -643,10 +644,10 @@ message TaskResponse {
 }
 ```
 
-**Implementation**:
-- Add gRPC server to worker (alongside asyncio)
-- Protocol Buffers for serialization
-- Client library for other languages (Go, Rust, etc.)
+**Implementation** (Sprint 3):
+- [x] Async gRPC server embedded in the Worker (`grpc.aio`, `conductor/grpc/`)
+- [x] Protocol Buffers serialization (`ProcessTask`, `RegisterHandler`, `GetWorkerStatus`)
+- [x] Client stubs for other languages (Go/Rust/Node reference examples) + `examples/8_grpc_client.py`
 
 **Effort**: 2 weeks
 
@@ -756,7 +757,7 @@ task_b_id = await queue.submit(
 | gRPC API | 2 weeks | MEDIUM | Week 6 |
 | Web Dashboard | 3 weeks | LOW | Week 6 |
 
-**Total Duration**: ~8 weeks
+**Total Duration**: ~8 weeks — all Phase 2 features delivered in **v0.2.0** (2026-08-13). — all Phase 2 features delivered in **v0.2.0** (2026-08-13).
 
 ---
 

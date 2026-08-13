@@ -832,7 +832,7 @@
 
 ## Phase 2: Advanced Features (v0.2)
 
-### Sprint 1: Task Routing & Priority Queues (Week 1-2) 🔄
+### Sprint 1: Task Routing & Priority Queues (Week 1-2) ✅
 
 #### Task Routing
 - [x] Add `route` column to `conductor_tasks` table (pre-scaffolded in v0.1 schema + index)
@@ -1073,11 +1073,14 @@
 
 ### Explicitly NOT Planned for v0.1
 
-- [ ] Web dashboard (v0.2)
-- [ ] gRPC API (v0.2)
-- [ ] Circuit breaker (v0.2)
+Delivered in v0.2 (2026-08-13):
+- [x] Web dashboard (v0.2)
+- [x] gRPC API (v0.2)
+- [x] Circuit breaker (v0.2)
 - [x] Task dependencies (v0.2)
-- [ ] Scheduled/recurring tasks (v0.2)
+- [x] Scheduled/recurring tasks (v0.2)
+
+Planned for v0.3+:
 - [ ] Multi-database support (v0.3)
 - [ ] Distributed tracing (v0.3)
 - [ ] SaaS offering (v0.3)
@@ -1174,6 +1177,14 @@
 - [x] License: MIT, included
 - [x] Code of Conduct: Added
 - [x] Contributing guide: Added
+
+**For v0.2.0** (2026-08-13):
+- [x] All Phase 2 tasks completed (Sprints 1–6: routing/priority, scheduled/recurring, gRPC, web dashboard, circuit breaker, task dependencies)
+- [x] Tests: 426 non-perf + 7 perf green; mypy --strict / black / flake8 clean
+- [x] Documentation: CHANGELOG `[0.2.0]` section + version/tag refs updated
+- [x] Frontend bundle committed (fixed `dist/` gitignore) and shipped in the wheel
+- [x] PyPI: Published — `conductor-task-queue` 0.2.0 live via trusted publishing (2026-08-13)
+- [x] GitHub: Release created — `v0.2.0` with CHANGELOG notes + sdist/wheel attached
 
 ---
 
