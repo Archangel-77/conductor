@@ -41,7 +41,8 @@ cp .env.example .env
 # 4. Create a virtualenv and install the package with dev extras
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
+# Install the optional backends too: the unit suite imports every backend module.
+pip install -e ".[dev,sqlite,mysql,otel]"
 ```
 
 > **No Docker?** Point `DATABASE_URL` / `CONDUCTOR_TEST_DATABASE_URL` at any
@@ -54,7 +55,9 @@ pip install -e ".[dev]"
 ```
 conductor/
 ├── core/            # TaskQueue, Worker, models
-├── db/              # asyncpg pool, schema migrations, query builder
+├── db/              # pool facade, per-backend dialects, schema migrations, query builder
+│   ├── backends/    # postgres / sqlite / mysql pools + dialects, DSN registry
+│   └── ddl/         # per-backend DDL plans
 ├── retry/           # retry policies & backoff (public API in core/models)
 ├── dlq/             # DeadLetterQueue
 ├── observability/   # JSON logging, Prometheus metrics, health checks
@@ -96,6 +99,9 @@ pytest tests/perf -m perf --no-cov
 - `CONDUCTOR_TEST_DATABASE_URL` defaults to
   `postgresql://conductor:conductor@localhost:5432/conductor_test` (matches the
   compose file).
+- Set `CONDUCTOR_TEST_DATABASE_URLS` (comma-separated) to run the backend parity
+  matrix (`tests/integration/test_backend_matrix.py`) against several backends at
+  once; an unreachable backend is skipped.
 - Aim for **85%+ coverage** on `conductor/` when adding features:
   ```bash
   pytest --cov=conductor --cov-report=term-missing

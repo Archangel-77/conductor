@@ -7,6 +7,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **MySQL/MariaDB backend** — new optional extra
+  (`pip install "conductor-task-queue[mysql]"`, `asyncmy` driver). Select it with
+  a `mysql://user:pass@host:3306/database` DSN (or `mariadb://`); no other
+  setting changes. Requires **MySQL 8.0.16+** or **MariaDB 10.6+** (`SELECT
+  VERSION()` is validated at `connect()`; an older server is rejected with a
+  clear `ConductorConnectionError` instead of a driver syntax error). Like
+  PostgreSQL — and unlike SQLite — pending rows are claimed with
+  `FOR UPDATE SKIP LOCKED`, so workers scale horizontally; timestamps are stored
+  as `DATETIME(6)` in UTC, arrays (`depends_on`) as `JSON` queried with
+  `JSON_CONTAINS`, and `ON DUPLICATE KEY UPDATE` replaces `ON CONFLICT` (inserts
+  without `RETURNING` detect duplicates through the affected-row count). The
+  schema is the current shape (**v6**) on first `connect()` — no migration.
+- `conductor/db/ddl/mysql.py` — the MySQL DDL plan. Indexes are embedded as
+  `KEY` clauses inside the `CREATE TABLE` statements (MySQL has no
+  `CREATE INDEX IF NOT EXISTS`), and every historic migration step is an empty,
+  recorded no-op because the backend ships at the latest schema version.
+- CI: `mysql` job running the backend parity matrix against real servers —
+  MySQL 8.0, MySQL 8.4 and MariaDB 11 (the matrix now lists MySQL alongside
+  PostgreSQL and SQLite).
+- Server-version guard: `SELECT VERSION()` is validated on `connect()` and a
+  server older than MySQL 8.0.16 / MariaDB 10.6 is rejected with a clear
+  `ConductorConnectionError` naming the detected version (previously the polling
+  query failed later with a raw driver syntax error). `parse_server_version()`
+  and `validate_server_version()` handle MariaDB's `5.5.5-` prefix.
+- Unit tests for the MySQL dialect, DSN parsing, statement rendering, the DDL
+  plan and the version guard (`tests/unit/test_mysql_ddl.py`, extended
+  `tests/unit/test_dialect.py`) — they need no server, and the rendering tests
+  assert that no PostgreSQL-only construct (`RETURNING`, `$n`, `ON CONFLICT`,
+  `ILIKE`, `NULLS LAST`, native arrays) can reach a MySQL connection.
+- **Distributed tracing (OpenTelemetry)** — new optional extra
+  (`pip install "conductor-task-queue[otel]"`). Spans cover submit, batch
+  submit, execute, cancel, DLQ retry/discard, blocked-dependent propagation and
+  recurring fires; without the extra every call is a no-op. Enable via
+  `Worker(tracing_config=...)`, `TRACING_ENABLED`/`TRACING_EXPORTER`/
+  `OTEL_SERVICE_NAME`/`OTEL_EXPORTER_OTLP_ENDPOINT`/`TRACING_SAMPLE_RATIO`, or
+  `conductor.observability.setup_tracing`. Requires **schema v6**.
+- **Trace context across processes (schema v6)** — `traceparent TEXT` on
+  `conductor_tasks` and `conductor_dead_letter`. The submitter persists a W3C
+  `traceparent`; the worker extracts it, so a task executed by another process
+  is a child of the span that submitted it. Preserved through DLQ retries, and
+  carried over gRPC (`TaskRequest.traceparent` / `TaskResponse.traceparent`).
+- **Log correlation** — `SpanContextFilter` puts `trace_id`/`span_id` on every
+  conductor log record while a span is active.
+- `Worker.get_status()` reports `tracing_enabled` / `tracing_exporter`.
+- Backend parity test matrix (`tests/integration/test_backend_matrix.py`) —
+  26 core flows run against every backend configured in
+  `CONDUCTOR_TEST_DATABASE_URLS`; by default that includes a temporary SQLite
+  database, so the SQLite leg needs no server. `tests/conftest.py` gained
+  `truncate_all()` and a scheme-aware `db_available()`.
+- CI: service-free `sqlite` job running the parity matrix against SQLite.
+
+### Changed
+
+- `execute()` now returns `Any` in the connection/pool protocols: PostgreSQL and
+  SQLite still return a command tag, while MySQL returns an integer row count.
+  Callers pass the result through `SqlDialect.normalize_rowcount()`.
+- `QueryBuilder` insert/upsert methods render `RETURNING` only when the dialect
+  supports it; `mark_dependents_blocked()` falls back to a locking read plus an
+  update on MySQL.
+
+### Fixed
+
+- MySQL: `mark_dependents_blocked()` bound its parameters out of order on the
+  no-`RETURNING` path (`error_message` precedes the `IN` list textually, but the
+  task IDs were passed first), so the `UPDATE` matched no rows — a failed
+  dependency was reported as blocked while its dependents stayed `pending`.
+  Found by running the parity matrix against a live MySQL 8.4 server; the unit
+  test now pins the parameter order.
+- Test portability: `tests/integration/test_dlq.py` and
+  `tests/integration/test_health.py` used raw PostgreSQL SQL (`$1`, `NOW()`,
+  `ON CONFLICT`) in their setup and `tests/unit/test_db_connection.py` assumed
+  `execute()` returns a string, so those tests failed on a MySQL DSN. They now
+  go through the dialect/`QueryBuilder` and pass on every backend;
+  `tests/unit/test_db_schema.py` is skipped, with a reason, on non-PostgreSQL
+  backends because its assertions are PostgreSQL catalogue and migration-ladder
+  specific.
+- **Retries now actually run.** A failed task was marked `retrying` with a
+  `scheduled_for` backoff time, but the polling query only selected
+  `pending` tasks — so a retryable failure was never re-executed (it stayed
+  `retrying` forever) and the DLQ was only reached via `max_retries=0`. The
+  polling query now claims `status IN ('pending', 'retrying')` once
+  `scheduled_for` has elapsed.
+- `TaskQueue.submit_many()` is now genuinely atomic: the batch previously
+  inserted through the pool one row at a time, so a mid-batch failure left
+  partial data behind.
+- `TaskQueue.retry_dlq_task()` no longer leaves the failed `worker_id` and error
+  message on the retried task, and its re-insert branch preserves
+  `route`/`priority`/`depends_on` instead of resetting them (now matches
+  `DeadLetterQueue.retry_task()`).
+- SQLite: liveness comparisons use millisecond-resolution `strftime`;
+  `datetime('now')` truncates to whole seconds, which made sub-second
+  `heartbeat_timeout` values ineffective.
+
 ## [0.2.0] - 2026-08-13
 
 ### Added

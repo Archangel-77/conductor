@@ -11,6 +11,122 @@ Common issues and debugging tips for Conductor.
 3. Check network/firewall rules and credentials
 4. The pool retries with backoff (default 3 attempts), then raises
 
+For MySQL/MariaDB the same flow applies; the message names the backend and the
+DSN form is `mysql://user:pass@host:3306/database`. Verify with
+`mysqladmin ping -h localhost -u conductor -p`.
+
+## SQLite issues
+
+### `sqlite3.OperationalError: database is locked`
+
+Another connection held a write lock for longer than `DB_BUSY_TIMEOUT`
+(default 5 seconds).
+
+1. Make sure only **one worker process** targets the file — a second worker is
+   the most common cause (see below).
+2. Raise the timeout: `export DB_BUSY_TIMEOUT=30`.
+3. Keep the database on a local filesystem. SQLite over NFS/SMB or a network
+   volume can produce spurious locking errors and is not supported.
+
+### Two workers never share the queue
+
+This is by design. SQLite has no `SKIP LOCKED`, so Conductor's SQLite backend
+contracts for **exactly one worker process per database file**; it serialises
+access inside that process (`BEGIN IMMEDIATE` + WAL) and provides the same
+exactly-once guarantee as PostgreSQL only within it. For horizontal scaling,
+use a PostgreSQL DSN — the task API is identical.
+
+A separate producer (`TaskQueue`) in the same process is fine.
+
+### Nothing is durable with `sqlite://:memory:`
+
+An in-memory database lives and dies with the connection; every restart starts
+empty. This is intentional (it is the fastest way to run the test suite) — use
+a file DSN for anything that must persist.
+
+### Are threads involved now?
+
+The SQLite driver (`aiosqlite`) runs a dedicated worker thread per connection.
+Conductor itself remains asyncio-only: no user code runs on that thread and no
+blocking calls are made from the event loop. There is no asyncio-native SQLite
+driver in the standard library, so this is an accepted, documented trade-off.
+
+### Missing `json_each` / `json_array_length`
+
+The dependency checks use the JSON1 functions, available in SQLite 3.38+
+(2022). Older system SQLite builds fail with `no such function: json_each` —
+upgrade SQLite (the CPython bundled version is fine on Python 3.11+).
+
+## MySQL / MariaDB issues
+
+### `The mysql backend requires an optional dependency`
+
+The driver lives in an extra:
+
+```bash
+pip install "conductor-task-queue[mysql]"
+```
+
+### `Check constraint 'chk_task_status' is not supported` / `Unknown collation`
+
+Use **MySQL 8.0.16+** (named `CHECK` constraints) or **MariaDB 10.6+**, and a
+server that knows the `utf8mb4` / `utf8mb4_unicode_ci` collations (every modern
+build does). MySQL 5.7 is not supported.
+
+### `Unsupported server version '10.5.x-MariaDB-…'`
+
+The server is older than the minimum Conductor requires: pending rows are
+claimed with `FOR UPDATE SKIP LOCKED` (MySQL 8.0+, **MariaDB 10.6+**) and the
+schema uses named `CHECK` constraints (MySQL 8.0.16+). Upgrade the server — on
+MariaDB 10.5 the polling query fails with a raw `SKIP LOCKED` syntax error, so
+Conductor refuses to connect instead.
+
+### `OperationalError: (2013, 'Lost connection')` on long tasks
+
+The driver aborts a read after `DB_COMMAND_TIMEOUT` seconds (default 60) — this
+becomes `read_timeout`. Raise it for handlers that run for minutes:
+
+```bash
+export DB_COMMAND_TIMEOUT=600
+```
+
+### `Incorrect string value` when storing emoji or CJK text
+
+The connection charset must be `utf8mb4` (Conductor's default). If you
+overrode it in the DSN with `?charset=utf8`, non-BMP characters fail: use
+`?charset=utf8mb4`.
+
+### Tasks execute twice / workers idle
+
+Verify `sql_mode` and the server version: row claiming relies on
+`FOR UPDATE SKIP LOCKED`, which needs **InnoDB** and MySQL 8.0+. On a 5.7
+server no rows are ever claimed, and tasks stay `pending` forever. Run
+`SELECT VERSION();` and check the schemas with
+`SELECT TABLE_NAME, ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE();`.
+
+### Benign driver warnings in the logs
+
+Both of these are harmless and expected; they are emitted by the server through
+the `asyncmy` logger:
+
+- `Table 'conductor_version' already exists` — the schema statements use
+  `CREATE TABLE IF NOT EXISTS`, so MySQL reports an existing table as a warning.
+  It appears once per `ensure_schema()` call (startup) and nothing is recreated.
+- `'VALUES function' is deprecated and will be removed in a future release …` —
+  Conductor renders `ON DUPLICATE KEY UPDATE col = VALUES(col)` for DLQ moves and
+  worker heartbeats. MySQL 8.0.20+ deprecates `VALUES()` in favour of a row alias
+  (`INSERT … VALUES (…) AS new …`), **but MariaDB rejects the alias form with a
+  syntax error**, so the portable form is used. The warning can be ignored.
+
+To reduce the noise without hiding real problems, raise the level of the driver
+logger in your logging configuration:
+
+```python
+import logging
+
+logging.getLogger("asyncmy").setLevel(logging.ERROR)
+```
+
 ## Tasks not processing
 
 **Symptom:** tasks submitted but never executed.

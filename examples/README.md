@@ -1,6 +1,6 @@
 # Conductor Examples
 
-Eleven runnable examples that demonstrate real-world Conductor patterns.
+Twelve runnable examples that demonstrate real-world Conductor patterns.
 Each script is self-contained, uses the public API, and exits cleanly.
 
 | # | File | Demonstrates |
@@ -16,6 +16,7 @@ Each script is self-contained, uses the public API, and exits cleanly.
 | 9 | `9_web_dashboard.py` | web dashboard (FastAPI API + built React SPA, cancel task) |
 | 10 | `10_circuit_breaker.py` | per-task-type circuit breaker (trip → skip → recover) |
 | 11 | `11_task_chaining.py` | task dependencies (`depends_on`: gate execution, block on failure) |
+| 12 | `12_distributed_tracing.py` | OpenTelemetry tracing (submit → execute in one trace, retry/DLQ events) |
 
 Polyglot **reference client stubs** (Go/Rust/Node) for the gRPC service live in
 [`grpc/`](grpc/README.md).
@@ -23,7 +24,11 @@ Polyglot **reference client stubs** (Go/Rust/Node) for the gRPC service live in
 ## Prerequisites
 
 - Python 3.11+
-- PostgreSQL 12+ reachable from `DATABASE_URL`
+- PostgreSQL 12+ reachable from `DATABASE_URL` — **or** MySQL/MariaDB
+  (`pip install "conductor-task-queue[mysql]"`, DSN
+  `mysql://conductor:conductor@localhost:3306/conductor`) — **or** SQLite,
+  which needs no server at all: `pip install "conductor-task-queue[sqlite]"`
+  and `DATABASE_URL=sqlite:///conductor.db` (one worker process per file).
 - The package installed: `pip install -e .`
 
 ## Database setup
@@ -108,6 +113,10 @@ instance and a `Worker` to execute it.  The definition's `next_run_at`
 advances to the next cron fire (UTC).  In production, run the scheduler
 continuously (`scheduler.run()`) — optionally embedded in a worker with
 `Worker(enable_scheduler=True)`.
+
+> Sections for examples **8–12** live in the numbered files themselves; this
+> page keeps the summary table above up to date.  Example 12 needs the tracing
+> extra: `pip install "conductor-task-queue[otel]"`.
 
 ## Notes
 

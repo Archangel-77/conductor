@@ -14,7 +14,7 @@ default. Values are parsed to the correct types (`CONCURRENCY` is an int,
 
 | Variable | Default | Description |
 |---|---|---|
-| `DATABASE_URL` | *(required)* | PostgreSQL connection URI, e.g. `postgresql://user:pass@host:5432/conductor` |
+| `DATABASE_URL` | *(required)* | Database URL — the scheme selects the backend: `postgresql://user:pass@host:5432/conductor`, `sqlite:///conductor.db`, or `mysql://user:pass@host:3306/conductor` |
 | `WORKER_ID` | `hostname-pid` | Unique worker identifier |
 | `CONCURRENCY` | `10` | Maximum concurrent tasks per worker |
 | `POLL_INTERVAL` | `0.5` | Seconds between task polls |
@@ -25,6 +25,7 @@ default. Values are parsed to the correct types (`CONCURRENCY` is an int,
 | `DB_MAX_SIZE` | `10` | Maximum connection pool size |
 | `DB_TIMEOUT` | `30` | Connection acquire timeout (seconds) |
 | `DB_COMMAND_TIMEOUT` | `60` | SQL command timeout (seconds) |
+| `DB_BUSY_TIMEOUT` | `5` | SQLite only: seconds to wait for a locked database before failing |
 | `HEARTBEAT_INTERVAL` | `10` | Worker heartbeat frequency (seconds) |
 | `GRACEFUL_SHUTDOWN_TIMEOUT` | `30` | Seconds to wait for in-flight tasks on shutdown |
 | `METRICS_PORT` | `8000` | Port for the metrics/health HTTP server |
@@ -41,6 +42,11 @@ default. Values are parsed to the correct types (`CONCURRENCY` is an int,
 | `CONDUCTOR_CIRCUIT_BREAKER_THRESHOLD` | `5` | Consecutive failures before the circuit opens |
 | `CONDUCTOR_CIRCUIT_BREAKER_TIMEOUT` | `60` | Seconds the circuit stays open before half-open probes |
 | `CONDUCTOR_CIRCUIT_BREAKER_HALF_OPEN_ATTEMPTS` | `2` | Probe executions allowed while half-open |
+| `TRACING_ENABLED` | `false` | Emit OpenTelemetry spans (requires the `otel` extra) |
+| `TRACING_EXPORTER` | `otlp` | `none`, `console`, or `otlp` |
+| `OTEL_SERVICE_NAME` | `conductor` | Value reported as `service.name` on every span |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | *(none)* | OTLP/HTTP endpoint, e.g. `http://localhost:4318/v1/traces` |
+| `TRACING_SAMPLE_RATIO` | `1.0` | Fraction of traces to sample (0.0–1.0) |
 | `CONDUCTOR_HANDLERS_MODULE` | *(none)* | Dotted path to a module exposing `register(worker)` |
 
 > **Note:** The CLI/`ROUTES` env default is `["default"]`.  Programmatically,
@@ -49,6 +55,102 @@ default. Values are parsed to the correct types (`CONCURRENCY` is an int,
 
 > **Note:** There is no separate `HEALTH_PORT` — `/metrics` and `/health`
 > are served on the same `METRICS_PORT` (default `8000`).
+
+## Database Backends
+
+The backend is selected by the **DSN scheme** in `DATABASE_URL` / the
+`database_url` argument — there is no separate setting:
+
+| DSN | Backend | Install |
+|---|---|---|
+| `postgresql://user:pass@host:5432/db` | PostgreSQL (asyncpg) | core dependency (default) |
+| `sqlite:///conductor.db` | SQLite (aiosqlite) | `pip install "conductor-task-queue[sqlite]"` |
+| `mysql://user:pass@host:3306/db` | MySQL/MariaDB (asyncmy) | `pip install "conductor-task-queue[mysql]"` |
+
+Everything else (`CONCURRENCY`, routes, retry policies, circuit breaker, gRPC,
+dashboard, …) behaves identically on every backend: `QueryBuilder`, the schema
+manager and the migrations render their SQL through a per-backend dialect, and
+the core flows are parity-tested across backends.
+
+Backend-specific notes:
+
+- **PostgreSQL** — the reference backend. Pending rows are claimed with
+  `FOR UPDATE SKIP LOCKED`, so any number of worker processes can share one
+  database.
+- **SQLite** — embedded and **single-process**: exactly one worker process per
+  database file (see
+  [Single-process contract](installation.md#single-process-contract)).
+  `DB_MIN_SIZE`, `DB_MAX_SIZE` and `DB_COMMAND_TIMEOUT` are ignored;
+  `DB_BUSY_TIMEOUT` controls how long a locked database is waited on.
+- **MySQL/MariaDB** — **MySQL 8.0+** (8.0.16+ for `CHECK` constraints) or
+  **MariaDB 10.6+**. Pending rows are claimed with `FOR UPDATE SKIP LOCKED`,
+  so workers scale horizontally like they do on PostgreSQL. `DB_BUSY_TIMEOUT`
+  is ignored (SQLite-only). Connection query parameters are passed through to
+  the driver, e.g.
+  `mysql://user:pass@host:3306/conductor?charset=utf8mb4&connect_timeout=10`.
+
+## Distributed Tracing
+
+Tracing is an **optional extra** — without it every tracing call is a no-op and
+no spans are produced:
+
+```bash
+pip install "conductor-task-queue[otel]"
+```
+
+```python
+from conductor import TaskQueue
+from conductor.observability import TracingConfig, setup_tracing
+
+setup_tracing(
+    TracingConfig(
+        enabled=True,
+        exporter="otlp",
+        endpoint="http://localhost:4318/v1/traces",
+        service_name="my-service",
+        sample_ratio=1.0,
+    )
+)
+
+async with TaskQueue(database_url="postgresql://...") as queue:
+    await queue.submit("send_email", {"to": "user@example.com"})
+```
+
+Or via the CLI / `WorkerSettings`, using the env vars above:
+
+```bash
+TRACING_ENABLED=true TRACING_EXPORTER=otlp \
+  OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318/v1/traces \
+  conductor worker --handlers myapp.handlers
+```
+
+### Spans
+
+| Span | Emitted by | Notes |
+|---|---|---|
+| `conductor.task.submit` | `TaskQueue.submit` | attributes: `task.id`, `task.type`, `task.route`, `task.priority` |
+| `conductor.task.submit_many` | `TaskQueue.submit_many` | one span per batch (`task.count`); every task shares its trace |
+| `conductor.task.execute` | `Worker._execute_task` | child of the submit span; attributes: `task.attempt`, `conductor.worker_id`; events: `retry.scheduled`, `task.dlq` |
+| `conductor.task.cancel` | `TaskQueue.cancel_task` | |
+| `conductor.dlq.retry` / `conductor.dlq.discard` | DLQ operations | retry links back to the original execution |
+| `conductor.task.block_dependents` | terminal-failure propagation | attributes: `blocked.count`, `blocked.task_ids` |
+| `conductor.recurring.fire` | `RecurringScheduler` | each generated task gets a child trace |
+
+### Cross-process propagation
+
+The submitter stores a W3C `traceparent` on the task row (schema **v6**), so a
+worker in another process (or a gRPC client, via `TaskRequest.traceparent`)
+continues the same trace. Every attempt of a task is a **child of the
+submission span**, i.e. attempts appear as siblings — they are independent
+executions of one submitted task. The `traceparent` is preserved through the
+dead-letter queue, so a DLQ retry links back to the original execution.
+
+With tracing enabled, log records also carry `trace_id`/`span_id`
+(`SpanContextFilter`), so logs and traces can be correlated.
+
+> Conductor keeps its tracer provider **private** rather than installing it as
+the global OpenTelemetry provider, so it never overrides a host application's
+setup.
 
 ## Programmatic Configuration
 

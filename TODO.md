@@ -1034,22 +1034,22 @@
 
 ### Multi-Database Support
 
-- [ ] MySQL/MariaDB backend
-  - [ ] Rewrite queries for MySQL syntax
-  - [ ] Test thoroughly
-  - [ ] Document
+- [x] MySQL/MariaDB backend (v0.4 Track A2, 2026-09-16 — `asyncmy`, extra `mysql`; MySQL 8.0.16+/MariaDB 10.5+)
+  - [x] Rewrite queries for MySQL syntax (per-backend `SqlDialect` + `ddl/mysql.py`; `supports_returning` fallbacks)
+  - [x] Test thoroughly (parity matrix leg + unit tests for dialect/DDL/rendering; runtime verification in the CI `mysql` job)
+  - [x] Document (`docs/installation.md`, `configuration.md`, `deployment.md`, `troubleshooting.md`, README)
 
-- [ ] SQLite backend
-  - [ ] Implement for embedded deployments
-  - [ ] Single-server only (no distributed polling)
-  - [ ] Test thoroughly
+- [x] SQLite backend (v0.3 Track A, 2026-09-15 — `aiosqlite`, extra `sqlite`)
+  - [x] Implement for embedded deployments
+  - [x] Single-server only (no distributed polling) — single-process contract documented
+  - [x] Test thoroughly (parity matrix leg + dialect/DDL unit tests)
 
 ### Distributed Tracing (OpenTelemetry)
 
-- [ ] Add OpenTelemetry instrumentation
-- [ ] Span creation for task submit/execute/retry
-- [ ] Export to Jaeger, Datadog, etc.
-- [ ] Update documentation
+- [x] Add OpenTelemetry instrumentation (v0.3 Track B, optional extra `otel`; no-op without it)
+- [x] Span creation for task submit/execute/retry (plus cancel, DLQ, recurring, blocked propagation)
+- [x] Export to Jaeger, Datadog, etc. (OTLP exporter; provider is set up by the caller/`Worker.run()`)
+- [x] Update documentation (`docs/configuration.md`, `docs/api-reference.md`, `README.md`, `examples/12_distributed_tracing.py`)
 
 ### Conductor Cloud (SaaS)
 

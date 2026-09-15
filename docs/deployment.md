@@ -94,6 +94,74 @@ sudo systemctl enable --now conductor-worker
 It runs `conductor worker` under a dedicated `conductor` user with
 `EnvironmentFile` pointing at your `.env` file.
 
+## Embedded SQLite (single process)
+
+SQLite removes the database server entirely, which suits appliances, desktop
+apps, and small services that run one worker:
+
+```bash
+pip install "conductor-task-queue[sqlite]"
+
+DATABASE_URL=sqlite:////var/lib/conductor/conductor.db \
+  conductor worker --handlers myapp.handlers
+```
+
+> **One worker process per database file.** SQLite has no
+> `FOR UPDATE SKIP LOCKED`, so cross-process row claiming is impossible. Run
+> two workers against the same file and a task can execute twice. Use
+> PostgreSQL whenever you need horizontal scaling.
+
+Operational notes:
+
+- Create the directory first and make it writable by the worker user; the file
+  is created on first `connect()`.
+- The journal runs in WAL mode, so `conductor.db-wal` and `conductor.db-shm`
+  appear alongside the database. **Back up all three** (or use
+  `sqlite3 conductor.db "VACUUM INTO '/backup/conductor.db'"` for a consistent
+  online copy) — copying only the main file can lose recent commits.
+- `DB_BUSY_TIMEOUT` (default `5s`) bounds how long a writer waits for a lock.
+- `/metrics` and `/health` work unchanged; the dashboard's read queries do too.
+
+## MySQL / MariaDB
+
+MySQL 8.0+ (or MariaDB 10.6+) behaves like PostgreSQL — workers claim rows with
+`FOR UPDATE SKIP LOCKED`, so you can scale out by running more worker processes
+against the same database:
+
+```bash
+pip install "conductor-task-queue[mysql]"
+
+DATABASE_URL=mysql://conductor:secret@mysql.internal:3306/conductor \
+  conductor worker --handlers myapp.handlers
+```
+
+A throwaway server for local experiments:
+
+```bash
+docker run -d --name conductor-mysql -p 3306:3306 \
+  -e MYSQL_ROOT_PASSWORD=root \
+  -e MYSQL_DATABASE=conductor \
+  -e MYSQL_USER=conductor \
+  -e MYSQL_PASSWORD=secret \
+  mysql:8.4
+```
+
+Operational notes:
+
+- The schema (InnoDB, `utf8mb4_unicode_ci`) is created on first `connect()`.
+  Grant the worker user DDL rights for that first start, or pre-apply the schema
+  with a privileged account.
+- Timestamps are stored as `DATETIME(6)` in **UTC**; keep the server timezone
+  and the application timezone aligned (`time_zone = '+00:00'`) so
+  `CURRENT_TIMESTAMP(6)` defaults match the values Conductor writes.
+- `DB_COMMAND_TIMEOUT` becomes the driver's `read_timeout`; raise it for
+  handlers that run for minutes.
+- `DB_MIN_SIZE` / `DB_MAX_SIZE` map to the driver's `minsize` / `maxsize`;
+  `DB_BUSY_TIMEOUT` is SQLite-only and ignored.
+- **MySQL 5.7 is not supported** (`CHECK` constraints and `SKIP LOCKED` are
+  missing); MariaDB needs 10.6+ (`FOR UPDATE SKIP LOCKED`). Older servers are
+  rejected at `connect()` with the detected version in the message.
+
 ## Web Dashboard
 
 The dashboard (FastAPI + built React frontend) ships inside the wheel, so no

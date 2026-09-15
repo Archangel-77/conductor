@@ -1,7 +1,9 @@
 # Conductor Documentation
 
-Conductor is a lightweight, async task queue for Python built entirely on
-PostgreSQL — no Redis, no message broker.
+Conductor is a lightweight, async task queue for Python that runs on the
+database you already have — no Redis, no message broker. PostgreSQL is the
+reference backend; **MySQL/MariaDB** and **SQLite** are supported too, and all
+three run the same parity-tested core flows.
 
 ## Getting Started
 

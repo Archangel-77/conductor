@@ -88,7 +88,10 @@ pip install conductor-task-queue
 
 **Prerequisites**:
 - Python 3.11+
-- PostgreSQL 12+
+- PostgreSQL 12+ — or **MySQL 8.0+ / MariaDB 10.6+**
+  (`pip install "conductor-task-queue[mysql]"`), or SQLite for embedded
+  single-process use (`pip install "conductor-task-queue[sqlite]"`, no server
+  required)
 
 ### Basic Example
 
@@ -435,6 +438,32 @@ c = await queue.submit("publish", {}, depends_on=[b])
 - Forward references are allowed; self-references are rejected. See
   ``examples/11_task_chaining.py``.
 
+### 12. Distributed Tracing (OpenTelemetry)
+
+OpenTelemetry spans for the whole task lifecycle, shipped in an optional extra
+(`pip install "conductor-task-queue[otel]"`; without it every call is a no-op):
+
+```bash
+TRACING_ENABLED=true TRACING_EXPORTER=otlp \
+  OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318/v1/traces \
+  conductor worker --handlers myapp.handlers
+```
+
+- **One trace per task** — the submitter persists a W3C `traceparent` on the
+task row (schema **v6**) and the worker continues it, so a task executed by a
+different process still appears under the span that submitted it.
+- Spans: `conductor.task.submit` / `.submit_many` / `.execute` / `.cancel`,
+`conductor.dlq.retry` / `.discard`, `conductor.task.block_dependents`,
+`conductor.recurring.fire`.  Retry scheduling and DLQ moves show up as span
+events (`retry.scheduled`, `task.dlq`).
+- Attribution without code changes: `trace_id`/`span_id` are added to every
+log record while a span is active.
+- `Worker.get_status()` reports `tracing_enabled` / `tracing_exporter`.
+- The gRPC API carries the context too (`TaskRequest.traceparent`).
+
+See ``examples/12_distributed_tracing.py`` and
+[docs/configuration.md](docs/configuration.md#distributed-tracing).
+
 ---
 
 ## Installation
@@ -442,12 +471,19 @@ c = await queue.submit("publish", {}, depends_on=[b])
 ### Prerequisites
 
 - **Python 3.11+**
-- **PostgreSQL 12+**
+- **PostgreSQL 12+** — or **MySQL 8.0+ / MariaDB 10.6+**, or **SQLite** for
+  embedded single-process deployments (`pip install "conductor-task-queue[sqlite]"`)
 
 ### Step 1: Install Conductor
 
 ```bash
 pip install conductor-task-queue
+
+# Embedded SQLite backend (no database server):
+pip install "conductor-task-queue[sqlite]"
+
+# MySQL/MariaDB backend (asyncmy driver):
+pip install "conductor-task-queue[mysql]"
 ```
 
 ### Step 2: Initialize Database
@@ -843,7 +879,10 @@ policy = RetryPolicy.from_dict({
 ### Environment Variables
 
 ```env
-# Database (required)
+# Database (required) — the scheme selects the backend:
+#   postgresql://user:pass@host:5432/conductor   (default)
+#   mysql://user:pass@host:3306/conductor        (MySQL 8.0+ / MariaDB 10.6+)
+#   sqlite:///conductor.db                       (embedded, single process)
 DATABASE_URL=postgresql://postgres:password@localhost:5432/conductor
 
 # Worker
@@ -873,6 +912,14 @@ DB_MIN_SIZE=2
 DB_MAX_SIZE=10
 DB_TIMEOUT=30
 DB_COMMAND_TIMEOUT=60
+DB_BUSY_TIMEOUT=5
+
+# Distributed tracing (requires the "otel" extra)
+TRACING_ENABLED=false
+TRACING_EXPORTER=otlp
+OTEL_SERVICE_NAME=conductor
+OTEL_EXPORTER_OTLP_ENDPOINT=
+TRACING_SAMPLE_RATIO=1.0
 ```
 
 > Full reference: [docs/configuration.md](docs/configuration.md).
@@ -957,6 +1004,10 @@ in [docs/grafana/](docs/grafana/README.md).
 3. **Idempotent task processing** – Workers record task IDs. Duplicate submissions are deduplicated automatically.
 4. **Async-first** – Built on asyncio. No threads, no blocking I/O.
 5. **Observable** – Every task transition logged and metered.
+6. **Portable across SQL backends** – SQL is rendered through a per-backend dialect, so the only
+   change between PostgreSQL, MySQL/MariaDB and SQLite is the DSN. PostgreSQL and MySQL/MariaDB
+   claim rows with `FOR UPDATE SKIP LOCKED` and scale workers horizontally; SQLite is embedded and
+   single-process (one worker per database file).
 
 ---
 
@@ -1345,7 +1396,7 @@ worker = Worker(database_url=database_url)
 | **Graceful shutdown** | ✅ | ✅ | ✅ | ✅ |
 | **Scheduled tasks** | ⚠️ (v0.2) | ✅ | ❌ | ✅ |
 | **Async-native** | ✅ | ⚠️ (hybrid) | ❌ | ✅ |
-| **PostgreSQL only** | ✅ | ❌ | ❌ | ❌ |
+| **Runs on PostgreSQL, MySQL/MariaDB or SQLite** | ✅ | ⚠️ (PostgreSQL + Redis) | ⚠️ (MySQL) | ❌ |
 | **Production-ready** | ✅ | ✅ | ⚠️ | ✅ |
 
 **When to use Conductor**:
@@ -1406,10 +1457,11 @@ worker = Worker(database_url=database_url)
 🔲 Web dashboard, gRPC API
 🔲 Circuit breaker pattern, task dependencies/chaining
 
-### Phase 3 (v0.3+ — Future)
+### Phase 3 (v0.3 — In Progress)
 
-🔲 Multi-database support (MySQL, SQLite)
-🔲 Distributed tracing (OpenTelemetry)
+✅ SQLite backend (v0.3.0) — embedded, single-process, parity-tested against PostgreSQL
+✅ OpenTelemetry tracing (v0.3.0) — cross-process trace context (schema v6)
+✅ MySQL/MariaDB backend (v0.4.0) — asyncmy driver, `FOR UPDATE SKIP LOCKED` row claiming
 🔲 Advanced workflows, task versioning
 
 ---
@@ -1426,7 +1478,8 @@ cp .env.example .env
 # 3. Create virtual environment & install
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
+# Include the optional backends: the unit suite imports every backend module.
+pip install -e ".[dev,sqlite,mysql,otel]"
 
 # 4. Run tests (schema auto-creates on first connect)
 pytest
@@ -1456,7 +1509,7 @@ process.
 - Observability enhancements
 - Documentation improvements
 - Example projects
-- Database backend support (MySQL, SQLite)
+- Database backend support (MariaDB tuning, additional backends)
 - Polyglot worker implementations
 
 ---

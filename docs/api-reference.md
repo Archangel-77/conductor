@@ -376,7 +376,6 @@ defaults come from the `CONDUCTOR_CIRCUIT_BREAKER_*` env vars (see
 ---
 
 ## Task Dependencies & Chaining
-
 Native task chaining via `TaskQueue.submit(..., depends_on=[...])`: a task
 with dependencies is **not polled** until every dependency is satisfied, so
 chains (A → B → C) run in order automatically.
@@ -470,7 +469,64 @@ All inherit from `ConductorException`:
 | `WorkerError` | Worker unrecoverable errors |
 | `TaskError` | Task submit/fetch/update failures |
 | `RetryPolicyError` | Invalid retry policy |
+| `CircuitBreakerError` | Invalid circuit-breaker configuration |
+| `TracingError` | Invalid tracing configuration, or tracing enabled without the `otel` extra |
 | `ConductorConnectionError` | Failed DB connection |
+
+---
+
+## Distributed Tracing
+
+Optional extra: `pip install "conductor-task-queue[otel]"`.  Without it every
+function below is a no-op, so call sites need no guards.
+
+### `TracingConfig`
+
+```python
+TracingConfig(
+    enabled=False,               # emit spans
+    service_name="conductor",    # resource service.name
+    exporter="otlp",             # "none" | "console" | "otlp"
+    endpoint=None,               # OTLP endpoint (or OTEL_EXPORTER_OTLP_ENDPOINT)
+    sample_ratio=1.0,            # 0.0-1.0
+)
+```
+
+`validate()` raises `TracingError` for an unknown exporter, an empty service
+name or an out-of-range ratio; `to_dict()` / `from_dict()` round-trip the
+configuration.
+
+### Functions (`conductor.observability.tracing`)
+
+| Function | Purpose |
+|---|---|
+| `setup_tracing(config)` | Install the backend (`enabled=False` resets to no-op) |
+| `shutdown_tracing()` | Flush and release the backend (idempotent) |
+| `is_available()` / `is_enabled()` / `get_backend_name()` | Diagnostics |
+| `span(name, *, attributes, parent, links)` | Context manager yielding the active span |
+| `current_traceparent()` | W3C `traceparent` of the active span (what gets persisted) |
+| `extract_traceparent(value)` | Parent context from a stored `traceparent` |
+| `span_link(value)` | Span link from a stored `traceparent` |
+| `current_trace_ids()` | `(trace_id, span_id)` of the active span |
+| `set_task_attributes(span, ...)` | Attach the standard `task.*` attributes |
+| `add_event(name, attributes)` | Annotate the active span (e.g. `retry.scheduled`) |
+| `mark_success()` / `record_error(message, exc=None)` | Set the span status |
+
+Span names are exported as constants (`SPAN_SUBMIT`, `SPAN_SUBMIT_MANY`,
+`SPAN_EXECUTE`, `SPAN_CANCEL`, `SPAN_DLQ_RETRY`, `SPAN_DLQ_DISCARD`,
+`SPAN_RECURRING_FIRE`, `SPAN_BLOCK_DEPENDENTS`) together with the attribute
+keys (`ATTR_TASK_ID`, `ATTR_TASK_TYPE`, `ATTR_TASK_ROUTE`, `ATTR_TASK_PRIORITY`,
+`ATTR_TASK_ATTEMPT`, `ATTR_TASK_STATUS`, `ATTR_WORKER_ID`).
+
+### `Worker(tracing_config=TracingConfig(...))`
+
+`Worker.run()` installs the backend at startup and flushes it during
+shutdown.  If tracing is requested but the extra is missing, the worker logs a
+warning and keeps running without tracing (like the metrics/gRPC/dashboard
+servers).
+
+`Task.traceparent` / `DLQTask.traceparent` expose the persisted context, and
+`Worker.get_status()` reports `tracing_enabled` / `tracing_exporter`.
 
 ---
 
@@ -483,7 +539,8 @@ All inherit from `ConductorException`:
 - `MetricsExporter(pool, health_checker, port=8000)` — serves `/metrics`
   (Prometheus) and `/health` (JSON). Started automatically by `Worker.run()`.
 - `JsonFormatter` / `setup_logging(level="INFO", fmt="json")` — structured
-  JSON logging (`conductor.observability.logging`).
+  JSON logging (`conductor.observability.logging`).  `SpanContextFilter` adds
+  `trace_id`/`span_id` to records while a span is active.
 
 ---
 

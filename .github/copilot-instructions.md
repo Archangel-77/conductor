@@ -3,9 +3,9 @@
 ## Project Identity
 - **Package**: `conductor-task-queue` v0.2.0, MIT license, published to PyPI
 - **Python**: 3.11+ only, asyncio-native, **no threads**
-- **Database**: PostgreSQL 12+ only, **no Redis**, no external message brokers
-- **Architecture**: Polling-based task dispatch against PostgreSQL; exactly-once semantics; idempotent task processing
-- **Status**: v0.2.0 released to PyPI (2026-08-13). v0.3 planned (webhooks, batch operations, multi-region).
+- **Database**: PostgreSQL 12+ (default; `asyncpg`), **MySQL 8.0.16+/MariaDB 10.6+** (`asyncmy`, extra `mysql`) or **SQLite** (`aiosqlite`, extra `sqlite`, single-process contract). **No Redis**, no external message brokers
+- **Architecture**: Polling-based task dispatch against the database; exactly-once semantics; idempotent task processing. The DSN scheme selects the backend and all SQL is rendered through a per-backend `SqlDialect`
+- **Status**: v0.2.0 released to PyPI (2026-08-13). v0.3/v0.4 work: SQLite + OpenTelemetry (v0.3.0), MySQL/MariaDB (v0.4.0)
 
 ## Code Style & Formatting
 - **Line length**: 100 characters (enforced by black and flake8)
@@ -39,10 +39,10 @@
 - All defined in `conductor/exceptions.py`
 
 ## Database Patterns
-- **Driver**: `asyncpg` only (connection pool via `DatabasePool` in `conductor/db/connection.py`)
-- **No ORM** — use raw SQL with asyncpg parameter placeholders (`$1`, `$2`, …)
-- **Polling**: Use `FOR UPDATE SKIP LOCKED` for atomic task acquisition
-- **Schema versioning**: Track via `conductor_version` table; migrations in `conductor/db/schema.py`; idempotent (`CREATE IF NOT EXISTS`)
+- **Driver**: `asyncpg` (PostgreSQL, core), `aiosqlite` (extra `sqlite`) or `asyncmy` (extra `mysql`); `DatabasePool` in `conductor/db/connection.py` is a facade over `backends/registry.create_pool()`
+- **No ORM** — use raw SQL rendered through `SqlDialect` (never hardcode `$1`/`?`/`%s`, `RETURNING`, `ON CONFLICT` or array syntax in a query)
+- **Polling**: Use `FOR UPDATE SKIP LOCKED` for atomic task acquisition (SQLite has no row locking and is single-process)
+- **Schema versioning**: Track via `conductor_version` table; migrations live per backend in `conductor/db/ddl/`; idempotent (`CREATE IF NOT EXISTS`)
 - **Query methods**: Defined in `QueryBuilder` class in `conductor/db/queries.py`; validate inputs with private helpers (`_validate_not_empty`, `_validate_task_status`)
 - **Connection management**: Use `DatabasePool.acquire()` as async context manager; always use transactions for batch operations
 
@@ -80,9 +80,11 @@ conductor/
 │   └── worker.py         # Worker: poll, execute, heartbeat, shutdown
 ├── db/
 │   ├── __init__.py
-│   ├── connection.py     # DatabasePool (asyncpg pool + health checks)
-│   ├── schema.py         # SchemaManager (idempotent migrations)
-│   └── queries.py        # QueryBuilder (type-safe SQL methods)
+│   ├── connection.py     # DatabasePool (facade over the backend pool + dialect)
+│   ├── schema.py         # SchemaManager (idempotent migrations; no SQL of its own)
+│   ├── queries.py        # QueryBuilder (type-safe SQL methods, rendered per dialect)
+│   ├── backends/         # base.py (protocols + SqlDialect), postgres.py, sqlite.py, mysql.py, registry.py
+│   └── ddl/              # __init__.py (SchemaDDL + get_ddl), postgres.py, sqlite.py, mysql.py
 ├── retry/
 │   ├── __init__.py        # To implement: policies.py, backoff.py
 ├── dlq/
@@ -92,7 +94,7 @@ conductor/
 ```
 
 ## Development Workflow
-- **Setup**: `docker compose up -d` → `cp .env.example .env` → `python3 -m venv .venv` → `pip install -e ".[dev]"`
+- **Setup**: `docker compose up -d` → `cp .env.example .env` → `python3 -m venv .venv` → `pip install -e ".[dev,sqlite,mysql,otel]"` (the unit suite imports every backend module, so the optional extras must be installed)
 - **Run tests**: `pytest` (all), `pytest -m unit` (fast), `pytest -m integration` (DB needed)
 - **Schema migration**: Auto-runs on first `connect()`, or manually via `SchemaManager(pool).ensure_schema()`
 - **Before committing**: Ensure `pytest` passes, `mypy conductor/` is clean, `black --check .` passes
@@ -117,8 +119,44 @@ Before finishing ANY task (feature, bug fix, refactor, or doc change), the agent
 - **v0.2 Sprint 5**: COMPLETE — Circuit breaker (worker-side, per-task-type).
 - **v0.2 Sprint 6**: COMPLETE — Task chaining/dependencies (schema v5 `BLOCKED`).
 - **v0.2.0**: RELEASED (2026-08-13) — Sprints 1–6 complete, published to PyPI (`conductor-task-queue`), GitHub Release `v0.2.0`.
-- **v0.3+** (future): webhook callbacks, batch operations, multi-region support.
-- Do **not** implement later v0.3 features before the plan calls for them — follow the plan.
+- **v0.3 Track A**: COMPLETE (2026-09-15) — pluggable DB backends (`conductor/db/backends/` + `conductor/db/ddl/`) and the **SQLite** backend. Schema stays **v5** (no migration). Plan of record: `todo_p3.md` (git-untracked) — v0.3.0 (SQLite + OpenTelemetry, schema v6), v0.4.0 (MySQL), v0.5.0 (workflows, v7), v0.6.0 (webhooks/batch, v8 + tenancy/auth, v9).
+- **v0.3 Track B**: COMPLETE (2026-09-15) — OpenTelemetry tracing + cross-process trace context (schema **v6** `traceparent`). Optional extra `otel`.
+- **v0.4 Track A2**: COMPLETE (2026-09-16) — **MySQL/MariaDB backend** (optional extra `mysql` = `asyncmy`). Schema stays **v6** (no migration). Runtime behaviour is **CI-verified only** (the `mysql` CI job runs MySQL 8.0 + 8.4; there is no MySQL server locally).
+- **v0.3 Tracks C/D/E** (planned): advanced workflows (v7), webhook callbacks + batch operations (v8), tenancy/auth/quota enablers (v9), multi-region docs.
+- Do **not** implement later v0.3 features before the plan calls for them — follow `todo_p3.md`.
+
+### Codified decisions — v0.4 Track A2 (MySQL/MariaDB backend)
+- **Driver**: `asyncmy` only, in the optional extra `mysql` (declared in **both** `pyproject.toml` and `setup.py`). `conductor/db/backends/mysql.py` is the only module importing `asyncmy`; `backends/__init__.py` must **not** re-export `MySqlPool` (optional drivers stay lazily imported by `registry.create_pool()`, exactly like `SqlitePool`). Minimum server: **MySQL 8.0.16+** (named `CHECK` constraints) / **MariaDB 10.6+** (`FOR UPDATE SKIP LOCKED`; MariaDB 10.5 fails the polling query, so `validate_server_version()` rejects it at `connect()` with the detected version); MySQL 5.7 is unsupported.
+- **Verified live (2026-09-15, Docker)**: full non-perf suite green on MySQL 8.0.46, MySQL 8.4 and MariaDB 11.8.9 (680 passed / 53 skipped each; 733 collected, the 26-test `test_db_schema.py` skip is PostgreSQL-only by design) and on PostgreSQL 16 (706 passed / 27 skipped). MariaDB 10.5.29 is correctly rejected. CI runs the parity matrix against MySQL 8.0 + 8.4 + MariaDB 11.
+- **`execute()` returns `Any`** in `ConnectionProtocol`/`PoolProtocol` and `DatabasePool`: PostgreSQL/SQLite return a command tag (`"UPDATE 1"`), MySQL returns an **int** rowcount. Always go through `SqlDialect.normalize_rowcount()`; `MySqlConnection.execute` coerces asyncmy's loosely-typed `cursor.rowcount` and reports `0` for DDL/SELECT.
+- **No `RETURNING`** (`supports_returning = False`). Conflict detection uses the affected-row count: `dialect.insert_ignore([...])` renders the **no-op** `ON DUPLICATE KEY UPDATE col = col` (0 rows ⇒ duplicate ⇒ `TaskError`), while idempotent upserts (DLQ, worker heartbeat) deliberately **ignore** the rowcount because MySQL reports 0 for "row already identical". `mark_dependents_blocked()` falls back to a locking `SELECT … FOR UPDATE` + `UPDATE` inside `pool.transaction()`, re-checking `status = 'pending'` so a concurrently completed dependent is never reported as blocked — **its parameters must be passed in textual order (`error_message` first, then the IDs)**; getting that backwards silently updates nothing while still reporting the dependents as blocked. Never make these paths unconditional — PostgreSQL must keep its single-statement `RETURNING` form.
+- **`ON DUPLICATE KEY UPDATE` uses `VALUES(col)`, never the MySQL 8.0.20+ row alias.** The alias form (`INSERT … VALUES (…) AS new … = new.col`) is **verified to be a MariaDB syntax error** (10.5 and 11.8), so keep `VALUES()` even though MySQL ≥ 8.0.20 logs deprecation warning 1287 (documented as benign in `docs/troubleshooting.md`).
+- **Transactions**: asyncmy exposes `begin()`/`commit()`/`rollback()` **as coroutines** (no transaction context manager), so `MySqlConnection.transaction()` wraps them explicitly. `autocommit=True` in the DSN means statements outside a transaction commit immediately.
+- **Types**: IDs `VARCHAR(64)`, name-like columns `VARCHAR(255)` (MySQL cannot index `TEXT`), `JSON` for `payload`/`result`/`retry_policy`/`depends_on`, `DATETIME(6)` in **UTC** (`CURRENT_TIMESTAMP(6)` defaults; `NOW(6)`; `DATE_SUB(NOW(6), INTERVAL %s SECOND)`), `TINYINT(1)` booleans coerced on read, tables `ENGINE=InnoDB CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`. `depends_on` is queried with `JSON_CONTAINS` (`JSON_QUOTE` the bound value) and is **not** indexed (a `JSON` column cannot be indexed usefully).
+- **DDL/indexes**: `ddl/mysql.py` embeds every index as a `KEY` clause **inside** the `CREATE TABLE` statements (`index_statements` is empty) — MySQL has no `CREATE INDEX IF NOT EXISTS`, and `CREATE TABLE IF NOT EXISTS` already makes the v0 → v1 step idempotent. All historic migration steps are empty but recorded (new backend ⇒ ships at the latest shape). `DROP TABLE IF EXISTS` takes no `CASCADE`.
+- **Tests**: MySQL needs no server for `tests/unit/test_dialect.py` + `tests/unit/test_mysql_ddl.py`, which pin (a) the rendered SQL never contains a PostgreSQL-only construct (`RETURNING`, `$n`, `ON CONFLICT`, `ILIKE`, `NULLS LAST`, `ARRAY[`) and every `%s` has a matching parameter (in the right order), (b) the DDL covers every column in `TASK_COLUMNS`/`DEAD_LETTER_COLUMNS`/`RECURRING_COLUMNS`, and (c) the server-version guard. `tests/integration/test_backend_matrix.py` lists `("postgresql", "sqlite", "mysql")` and skips unavailable backends. Local MySQL/MariaDB servers (Docker): `docker run -d --name conductor-mysql -e MYSQL_ROOT_PASSWORD=root -e MYSQL_DATABASE=conductor_test -e MYSQL_USER=conductor -e MYSQL_PASSWORD=conductor -p 127.0.0.1:3306:3306 mysql:8.4`.
+
+### Codified decisions — v0.3 Track B (distributed tracing)
+- Tracing is an **optional extra** (`otel` = opentelemetry-api/sdk/otlp-http). `conductor/observability/tracing.py` has **no import-time OpenTelemetry dependency**; `conductor/observability/_otel.py` is the only module importing the SDK and is imported lazily — it doubles as the availability canary for `is_available()`. Without the extra every public call is a no-op, so call sites never need guards.
+- The tracer provider is **private** (Conductor never calls `trace.set_tracer_provider`), so a host application's OpenTelemetry setup is not overridden. `Worker.run()` installs it; `Worker._shutdown()` flushes it.
+- `setup_tracing()` **raises `TracingError`** when tracing is enabled without the extra; `Worker.run()` catches it and logs a WARNING (the metrics/gRPC/dashboard degradation pattern). Never crash a worker over telemetry.
+- Core modules (queue/worker/scheduler/gRPC) must **not import OpenTelemetry**: they use `tracing.span()`, `add_event()`, `mark_success()`, `record_error()`, `set_task_attributes()`, `current_traceparent()`, `extract_traceparent()`, `span_link()`.
+- **Propagation model**: the submitter persists the W3C `traceparent` on the task row (schema v6, preserved through the DLQ), and every attempt is a **child of the submission span** — attempts are siblings, not a nested chain. `links` are used for the DLQ-retry *operation* span. Per-attempt linking would need a `traceparent` column on `conductor_retries` (not implemented).
+- Schema v6 adds `traceparent TEXT` to `conductor_tasks` **and** `conductor_dead_letter`. New task columns go into `TASK_COLUMNS`/`DEAD_LETTER_COLUMNS` (queries.py) — those tuples drive the insert placeholders — plus the DDL of every backend and `_task_to_db_dict`.
+- gRPC carries the context in `TaskRequest.traceparent` / `TaskResponse.traceparent`; regenerate stubs via `scripts/generate_grpc.py` **and** update the hand-maintained `.pyi`.
+- Logs: `SpanContextFilter` adds `trace_id`/`span_id` while a span is active (records are untouched otherwise).
+- **Behaviour change (bug fix, v0.1/v0.2 regression)**: `select_pending_tasks` claims `status IN ('pending', 'retrying')` once `scheduled_for` has elapsed — previously retries were marked `retrying` but never re-polled, so a retryable failure never ran again. **Never narrow this back to `status = 'pending'`** (regression test: `test_backend_matrix.py::TestRetryAndDlq::test_due_retry_is_reexecuted`).
+- Tracing tests: install **one** in-memory exporter per module and never reinstall tracing mid-module — `setup_tracing()` builds a new provider, which orphans the fixture's exporter (monkeypatch to simulate "tracing off" instead).
+
+### Codified decisions — v0.3 Track A (portable DB core + SQLite)
+- The backend is chosen from the **DSN scheme** (`postgresql://`, `sqlite:///`, `mysql://`); there is no separate setting. `conductor/db/connection.py` is a facade over `registry.create_pool()`, and backend construction is **lazy** (a bad DSN must fail at `connect()`, not at construction).
+- Only `conductor/db/backends/postgres.py` imports `asyncpg`. DDL text lives in `conductor/db/ddl/<backend>.py`; `SchemaManager` contains no SQL of its own. New backends declare the full latest shape as migration **step 1** and leave historic steps empty (they still record a version row).
+- `QueryBuilder` renders every statement through `self._dialect`. **Placeholders must appear in textual order** (= parameter order): SQLite binds `?` positionally, so the `WHERE id` parameter goes **last** in dynamic `UPDATE`s.
+- Affected-row counts go through `dialect.normalize_rowcount()`; the SQLite adapter **synthesises asyncpg-style command tags** (`"UPDATE 1"`) so `DatabasePool.execute()` keeps returning `str`.
+- **JSON decoding belongs in `SqlDialect.decode_json_value`** — asyncpg returns `JSONB` as *text* on Python 3.14. Removing it breaks the whole PostgreSQL suite.
+- SQLite specifics: single-process contract (one worker per file), re-entrant `ContextVar`-guarded `asyncio.Lock` + `BEGIN IMMEDIATE`, WAL, timestamps stored as `YYYY-MM-DD HH:MM:SS.ffffff` UTC (`strftime('%Y-%m-%d %H:%M:%f000','now')` — **SQLite's `%f` is `SS.SSS`, not microseconds**), `depends_on` as JSON `TEXT` + JSON1 functions, booleans as `INTEGER` coerced on read, `for_update_skip_locked()` returns `""`, `DROP TABLE` takes no `CASCADE`.
+- Optional drivers never import at package-import time: `backends/__init__.py` does not re-export `SqlitePool`; `registry.create_pool()` imports the driver lazily and raises `ConductorConnectionError` naming the extra to install. Extras (`sqlite` = aiosqlite) are declared in **both** `pyproject.toml` and `setup.py`.
+- Tests: new backends must join `tests/integration/test_backend_matrix.py` (parametrized by backend, skips when unavailable). `db_available()` validates the DSN scheme; clean up with `truncate_all()`; async fixtures that touch session-scoped pools **must** set `loop_scope="session"`.
 
 ### Codified decisions — v0.2 Sprint 1 (routing & priority)
 - `Worker(routes=None)` (programmatic default) polls **all** routes (no route filter). The CLI / `ROUTES` env var defaults to `["default"]` — this asymmetry is intentional and documented.
