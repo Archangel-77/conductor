@@ -17,19 +17,27 @@ Every public method validates its arguments before constructing a query.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, cast
 
 from croniter import croniter
 
+from conductor.core.models import utc_now
 from conductor.db.backends.base import PoolProtocol, SqlDialect
 from conductor.db.backends.postgres import PostgresDialect
 from conductor.db.connection import DatabasePool
 from conductor.exceptions import TaskError
 
 logger = logging.getLogger("conductor.db.queries")
+
+_CLAIM_MAX_RETRIES = 3
+"""How often a claim is retried after a retryable database abort (deadlock)."""
+
+_CLAIM_RETRY_DELAY = 0.05
+"""Base backoff (seconds) between claim retries; multiplied by the attempt."""
 
 TASK_COLUMNS: tuple[str, ...] = (
     "task_id",
@@ -308,12 +316,7 @@ class QueryBuilder:
             raise ValueError("offset must be >= 0")
 
         dialect = self._dialect
-        deps_gate = (
-            f"({dialect.cardinality('t.depends_on')} = 0 OR NOT EXISTS ("
-            f"SELECT 1 FROM conductor_tasks d "
-            f"WHERE {dialect.array_element_in('d.task_id', 't.depends_on')} "
-            f"AND d.status NOT IN ('completed', 'cancelled')))"
-        )
+        deps_gate = self._deps_satisfied_clause()
         locking = dialect.for_update_skip_locked()
 
         if route:
@@ -341,6 +344,252 @@ class QueryBuilder:
             rows = await self._pool.fetch(query, limit, offset)
 
         return [self._row_to_dict(r) for r in rows]
+
+    async def claim_pending_tasks(
+        self,
+        limit: int = 10,
+        *,
+        worker_id: str,
+        route: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """Atomically claim up to *limit* eligible tasks for *worker_id*.
+
+        Claiming is one logical operation: the rows move to ``processing`` as
+        part of taking the claim, so two workers polling at the same time can
+        never receive the same task.  ``FOR UPDATE SKIP LOCKED`` alone is *not*
+        enough — the locks are released when the statement ends, which is why
+        the status transition must happen in the same statement (or inside one
+        transaction for backends without ``RETURNING``).
+
+        The eligibility filter is identical to :meth:`select_pending_tasks`
+        (status, ``scheduled_for``, dependencies, optional route).
+
+        Args:
+            limit: Maximum number of tasks to claim.
+            worker_id: The worker taking the claim (stored on the rows).
+            route: Optional route filter.
+
+        Returns:
+            The claimed rows in ``priority DESC, created_at ASC`` order.
+
+        Raises:
+            ValueError: If ``limit`` is invalid or ``worker_id`` is empty.
+        """
+        if limit < 1:
+            raise ValueError("limit must be >= 1")
+        _validate_not_empty(worker_id, "worker_id")
+
+        dialect = self._dialect
+        deps_gate = self._deps_satisfied_clause()
+        locking = dialect.for_update_skip_locked()
+
+        if dialect.supports_returning:
+            # The locking read lives in a *materialised* CTE.  Putting
+            # ``FOR UPDATE SKIP LOCKED`` in the UPDATE's subquery instead makes
+            # PostgreSQL ignore the LIMIT for the rows it locks and updates
+            # (verified: ``LIMIT 10`` claimed all 40 pending rows, stranding 30
+            # of them).  Materialising the CTE keeps the row set and the lock
+            # set identical.  Parameters are appended in textual order because
+            # positional backends (SQLite) bind by position.
+            params: list[Any] = []
+            route_clause = ""
+            if route:
+                params.append(route)
+                route_clause = f"AND route = {dialect.placeholder(len(params))}"
+            params.append(limit)
+            limit_placeholder = dialect.placeholder(len(params))
+            params.append(worker_id)
+            worker_placeholder = dialect.placeholder(len(params))
+
+            query = f"""
+                WITH claimed AS MATERIALIZED (
+                    SELECT t.task_id FROM conductor_tasks t
+                     WHERE t.status IN ('pending', 'retrying')
+                       AND (t.scheduled_for IS NULL OR t.scheduled_for <= {dialect.now()})
+                       AND {deps_gate}
+                       {route_clause}
+                     ORDER BY t.priority DESC, t.created_at ASC
+                     LIMIT {limit_placeholder}
+                     {locking}
+                )
+                UPDATE conductor_tasks
+                   SET status = 'processing',
+                       worker_id = {worker_placeholder},
+                       started_at = {dialect.now()}
+                 WHERE task_id IN (SELECT task_id FROM claimed)
+                 RETURNING *
+            """
+            rows = await self._pool.fetch(query, *params)
+            return self._sort_claimed(rows)
+
+        # Backends without ``RETURNING`` keep the rows locked inside one
+        # transaction, then re-check the status on the update so a row that was
+        # completed/cancelled in the meantime is never reported as claimed.
+        route_clause = ""
+        select_params: list[Any] = []
+        if route:
+            route_clause = f"AND route = {dialect.placeholder(1)}"
+            select_params.append(route)
+        select_params.append(limit)
+        select_query = f"""
+            SELECT t.task_id FROM conductor_tasks t
+             WHERE t.status IN ('pending', 'retrying')
+               AND (t.scheduled_for IS NULL OR t.scheduled_for <= {dialect.now()})
+               AND {deps_gate}
+               {route_clause}
+             ORDER BY t.priority DESC, t.created_at ASC
+             LIMIT {dialect.placeholder(len(select_params))}
+             {locking}
+        """
+
+        retries = 0
+        while True:
+            try:
+                async with self._pool.transaction() as conn:
+                    candidates = await conn.fetch(select_query, *select_params)
+                    task_ids = [str(self._row_to_dict(row)["task_id"]) for row in candidates]
+                    if not task_ids:
+                        return []
+
+                    await conn.execute(
+                        "UPDATE conductor_tasks SET status = 'processing', "
+                        f"worker_id = {dialect.placeholder(1)}, "
+                        f"started_at = {dialect.now()} "
+                        "WHERE status IN ('pending', 'retrying') "
+                        f"AND task_id IN ({dialect.placeholder_list(2, len(task_ids))})",
+                        worker_id,
+                        *task_ids,
+                    )
+                    rows = await conn.fetch(
+                        "SELECT * FROM conductor_tasks "
+                        f"WHERE worker_id = {dialect.placeholder(1)} "
+                        "AND status = 'processing' "
+                        f"AND task_id IN ({dialect.placeholder_list(2, len(task_ids))})",
+                        worker_id,
+                        *task_ids,
+                    )
+                return self._sort_claimed(rows)
+            except Exception as exc:  # noqa: BLE001 - re-raised unless retryable
+                retries += 1
+                if retries > _CLAIM_MAX_RETRIES or not dialect.is_retryable_transaction_error(exc):
+                    raise
+                logger.warning(
+                    "Task claim aborted by the database (%s); retrying (%d/%d).",
+                    exc,
+                    retries,
+                    _CLAIM_MAX_RETRIES,
+                    extra={"attempt": retries},
+                )
+                await asyncio.sleep(_CLAIM_RETRY_DELAY * retries)
+
+    async def release_claim(self, task_id: str) -> bool:
+        """Return a claimed (``processing``) task to ``pending``.
+
+        Used when a worker decides not to execute a task it already claimed
+        (for example while its circuit breaker is open), so the row does not
+        stay stranded in ``processing``.  The attempt count and payload are
+        left untouched.
+
+        Args:
+            task_id: The task to release.
+
+        Returns:
+            ``True`` if a claimed row was released, ``False`` otherwise.
+
+        Raises:
+            ValueError: If ``task_id`` is empty.
+        """
+        _validate_not_empty(task_id, "task_id")
+        dialect = self._dialect
+        result = await self._pool.execute(
+            "UPDATE conductor_tasks "
+            "SET status = 'pending', worker_id = NULL, started_at = NULL "
+            f"WHERE task_id = {dialect.placeholder(1)} AND status = 'processing'",
+            task_id,
+        )
+        return dialect.normalize_rowcount(result, verb="UPDATE") == 1
+
+    async def reclaim_stale_tasks(self, stale_after_seconds: float) -> int:
+        """Return tasks stranded by dead workers to ``pending``.
+
+        Claiming moves a row to ``processing`` immediately, so a worker that
+        dies mid-execution would otherwise hold the row forever.  A row is only
+        reclaimed when it was claimed more than *stale_after_seconds* ago **and**
+        its owner is no longer alive — unknown (no heartbeat row at all, e.g. a
+        worker that crashed before its first heartbeat) or silent for longer than
+        that window.  A live worker running a slow task keeps its claim.
+
+        Args:
+            stale_after_seconds: Age above which an orphaned claim is considered
+                dead.
+
+        Returns:
+            The number of tasks returned to ``pending``.
+
+        Raises:
+            ValueError: If ``stale_after_seconds`` is not positive.
+        """
+        if stale_after_seconds <= 0:
+            raise ValueError("stale_after_seconds must be > 0")
+
+        dialect = self._dialect
+        cutoff = utc_now() - timedelta(seconds=stale_after_seconds)
+        alive_rows = await self._pool.fetch(
+            "SELECT worker_id FROM conductor_workers "
+            "WHERE last_heartbeat IS NOT NULL "
+            f"AND last_heartbeat >= {dialect.placeholder(1)}",
+            cutoff,
+        )
+        alive_workers = [str(self._row_to_dict(row)["worker_id"]) for row in alive_rows]
+
+        params: list[Any] = [cutoff]
+        owner_clause = ""
+        if alive_workers:
+            owner_clause = (
+                " AND (worker_id IS NULL OR "
+                f"worker_id NOT IN ({dialect.placeholder_list(2, len(alive_workers))}))"
+            )
+            params.extend(alive_workers)
+
+        result = await self._pool.execute(
+            "UPDATE conductor_tasks "
+            "SET status = 'pending', worker_id = NULL, started_at = NULL "
+            "WHERE status = 'processing' "
+            f"AND started_at IS NOT NULL AND started_at < {dialect.placeholder(1)}"
+            f"{owner_clause}",
+            *params,
+        )
+        reclaimed = dialect.normalize_rowcount(result, verb="UPDATE")
+        if reclaimed:
+            logger.warning(
+                "Reclaimed %d task(s) stranded in 'processing' by dead workers.",
+                reclaimed,
+                extra={"count": reclaimed},
+            )
+        return reclaimed
+
+    def _deps_satisfied_clause(self) -> str:
+        """Render the "every dependency is satisfied" predicate for alias ``t``."""
+        dialect = self._dialect
+        return (
+            f"({dialect.cardinality('t.depends_on')} = 0 OR NOT EXISTS ("
+            f"SELECT 1 FROM conductor_tasks d "
+            f"WHERE {dialect.array_element_in('d.task_id', 't.depends_on')} "
+            f"AND d.status NOT IN ('completed', 'cancelled')))"
+        )
+
+    def _sort_claimed(self, rows: list[Any]) -> list[dict[str, Any]]:
+        """Normalise claimed rows and order them like the poll query does."""
+
+        def _order(row: dict[str, Any]) -> tuple[int, datetime]:
+            created = row.get("created_at")
+            if not isinstance(created, datetime):
+                created = datetime.min.replace(tzinfo=timezone.utc)
+            return (-int(row.get("priority") or 0), created)
+
+        claimed = [self._row_to_dict(row) for row in rows]
+        claimed.sort(key=_order)
+        return claimed
 
     async def select_tasks_by_status(
         self,

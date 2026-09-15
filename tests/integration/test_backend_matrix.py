@@ -34,6 +34,7 @@ from conductor.core.models import RetryPolicy
 from conductor.core.queue import TaskQueue
 from conductor.core.worker import Worker
 from conductor.db.connection import DatabasePool
+from conductor.db.queries import QueryBuilder
 from conductor.db.schema import SchemaManager
 from conductor.exceptions import ConductorConnectionError, TaskError
 from tests.conftest import TEST_DATABASE_URL, truncate_all
@@ -337,6 +338,158 @@ class TestPolling:
         )
         pending = await queue.list_pending_tasks(limit=10)
         assert [t.task_id for t in pending] == [due]
+
+
+# ===================================================================
+# Exactly-once claiming
+# ===================================================================
+
+
+class TestExactlyOnceClaim:
+    """A task must never be handed to two workers.
+
+    ``FOR UPDATE SKIP LOCKED`` alone is not enough — those locks are released
+    when the selecting statement ends, so the claim has to move the row to
+    ``processing`` in the same statement (or transaction).  With the non-atomic
+    implementation every run produced 45-60 executions for 40 tasks on
+    PostgreSQL and MySQL with two workers.
+    """
+
+    async def test_concurrent_claims_never_overlap(
+        self, backend: Backend, queue: TaskQueue
+    ) -> None:
+        queries = QueryBuilder(backend.pool)
+        total = 12
+        submitted = await queue.submit_many([("work", {"i": index}) for index in range(total)])
+
+        batches = await asyncio.gather(
+            *(queries.claim_pending_tasks(limit=10, worker_id=f"w{index}") for index in range(5))
+        )
+
+        claimed_ids = [row["task_id"] for batch in batches for row in batch]
+        assert len(set(claimed_ids)) == len(claimed_ids), "a task was claimed by two workers"
+        for batch in batches:
+            for row in batch:
+                assert row["status"] == "processing"
+                assert str(row["worker_id"]).startswith("w")
+
+        # ``SKIP LOCKED`` lets a claim skip rows another claim is holding (on
+        # MySQL a concurrent claim locks the range it scans), so the concurrent
+        # calls need not return everything — but every task must be claimable
+        # exactly once, and nothing may be claimed twice.
+        for index in range(10):
+            more = await queries.claim_pending_tasks(limit=10, worker_id=f"drain-{index}")
+            if not more:
+                break
+            claimed_ids.extend(str(row["task_id"]) for row in more)
+
+        assert sorted(claimed_ids) == sorted(submitted)
+
+        # Everything is claimed: a later poll finds nothing.
+        assert await queries.claim_pending_tasks(limit=10, worker_id="late") == []
+        assert await queue.list_pending_tasks(limit=50) == []
+
+    async def test_released_claim_is_claimable_again(
+        self, backend: Backend, queue: TaskQueue
+    ) -> None:
+        queries = QueryBuilder(backend.pool)
+        task_id = await queue.submit("work", {})
+
+        first = await queries.claim_pending_tasks(limit=1, worker_id="w1")
+        assert [row["task_id"] for row in first] == [task_id]
+
+        assert await queries.release_claim(task_id) is True
+        assert await queries.release_claim(task_id) is False  # no claim left to release
+
+        second = await queries.claim_pending_tasks(limit=1, worker_id="w2")
+        assert [row["task_id"] for row in second] == [task_id]
+        assert second[0]["worker_id"] == "w2"
+
+    async def test_claim_respects_route_and_priority(
+        self, backend: Backend, queue: TaskQueue
+    ) -> None:
+        queries = QueryBuilder(backend.pool)
+        low = await queue.submit("work", {}, route="emails", priority=-5)
+        high = await queue.submit("work", {}, route="emails", priority=5)
+        other = await queue.submit("work", {}, route="reports")
+
+        claimed = await queries.claim_pending_tasks(limit=10, worker_id="w1", route="emails")
+        assert [row["task_id"] for row in claimed] == [high, low]
+
+        remaining = await queue.list_pending_tasks(limit=10)
+        assert [task.task_id for task in remaining] == [other]
+
+    async def test_two_workers_execute_each_task_once(
+        self, backend: Backend, queue: TaskQueue
+    ) -> None:
+        """End-to-end regression: concurrent workers, no duplicate execution."""
+        total = 12
+        seen: list[int] = []
+
+        async def handler(payload: dict[str, Any]) -> dict[str, Any]:
+            seen.append(int(payload["i"]))
+            return {"i": payload["i"]}
+
+        await queue.submit_many([("count", {"i": index}) for index in range(total)])
+
+        async with (
+            running_worker(backend, {"count": handler}, worker_id="exactly-once-a") as worker_a,
+            running_worker(backend, {"count": handler}, worker_id="exactly-once-b") as worker_b,
+        ):
+            for _ in range(20):
+                await asyncio.gather(worker_a.run_once(), worker_b.run_once())
+                if len(seen) >= total:
+                    break
+
+        assert sorted(seen) == list(range(total)), f"executions not exactly once: {sorted(seen)}"
+        assert await queue.list_pending_tasks(limit=50) == []
+
+    async def test_stale_claim_from_a_dead_worker_is_reclaimed(
+        self, backend: Backend, queue: TaskQueue
+    ) -> None:
+        """A worker that dies holding a claim must not strand the task."""
+        queries = QueryBuilder(backend.pool)
+        await queue.submit("orphan", {})
+
+        claimed = await queries.claim_pending_tasks(limit=1, worker_id="ghost-worker")
+        assert len(claimed) == 1
+        task_id = str(claimed[0]["task_id"])
+
+        # Too fresh to touch, even though the owner never registered a heartbeat.
+        assert await queries.reclaim_stale_tasks(0.05) == 0
+        await asyncio.sleep(0.1)
+        assert await queries.reclaim_stale_tasks(0.05) == 1
+
+        task = await queue.get_task(task_id)
+        assert task is not None
+        assert task.status.value == "pending"
+        assert task.worker_id is None
+
+        # And it is claimable again.
+        again = await queries.claim_pending_tasks(limit=1, worker_id="w-after-crash")
+        assert [row["task_id"] for row in again] == [task_id]
+
+    async def test_live_worker_keeps_its_claim(self, backend: Backend, queue: TaskQueue) -> None:
+        """A slow task must not be stolen while its owner keeps heartbeating."""
+        queries = QueryBuilder(backend.pool)
+        await queue.submit("slow", {})
+        await queries.upsert_worker({"worker_id": "slow-worker"})
+
+        claimed = await queries.claim_pending_tasks(limit=1, worker_id="slow-worker")
+        assert len(claimed) == 1
+        await asyncio.sleep(0.1)
+        # The claim is older than the window, but its owner is still alive
+        # (heartbeats are what protect a long-running execution).
+        await queries.update_worker_heartbeat("slow-worker")
+        assert await queries.reclaim_stale_tasks(0.05) == 0
+
+        # Silence the owner past the window and the claim becomes reclaimable.
+        await backend.pool.execute(
+            "UPDATE conductor_workers SET last_heartbeat = NULL "
+            f"WHERE worker_id = {backend.pool.dialect.placeholder(1)}",
+            "slow-worker",
+        )
+        assert await queries.reclaim_stale_tasks(0.05) == 1
 
 
 # ===================================================================

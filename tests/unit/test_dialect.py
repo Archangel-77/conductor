@@ -313,12 +313,20 @@ class TestRowNormalization:
 class _RecordingPool:
     """A pool double that records every statement and its parameters."""
 
-    dialect = MYSQL
+    dialect: SqlDialect = MYSQL
 
-    def __init__(self, *, rowcount: int = 1, rows: list[dict[str, Any]] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        rowcount: int = 1,
+        rows: list[dict[str, Any]] | None = None,
+        dialect: SqlDialect = MYSQL,
+    ) -> None:
+        self.dialect = dialect
         self.statements: list[tuple[str, tuple[Any, ...]]] = []
         self.rowcount = rowcount
         self.rows = rows if rows is not None else []
+        self.transactions = 0
 
     def _record(self, query: str, args: tuple[Any, ...]) -> None:
         self.statements.append((query, args))
@@ -341,6 +349,7 @@ class _RecordingPool:
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[_RecordingPool]:
+        self.transactions += 1
         yield self
 
     @asynccontextmanager
@@ -476,6 +485,143 @@ class TestMySqlStatementRendering:
         assert "d.status NOT IN ('completed', 'cancelled')" in query
         assert "scheduled_for <= NOW(6)" in query
         assert "FOR UPDATE SKIP LOCKED" in query
+
+
+# ===================================================================
+# Atomic task claiming (all backends)
+# ===================================================================
+
+
+class TestAtomicClaimRendering:
+    """Claiming must move rows to ``processing`` *as part of* taking the claim.
+
+    ``FOR UPDATE SKIP LOCKED`` on its own is not enough: those locks are
+    released the moment the statement ends, so the status transition has to
+    happen in the same statement (``RETURNING`` backends) or inside one
+    transaction — otherwise two workers claim the same task.
+    """
+
+    @staticmethod
+    def _builder(dialect: SqlDialect, **kwargs: Any) -> tuple[QueryBuilder, _RecordingPool]:
+        pool = _RecordingPool(dialect=dialect, **kwargs)
+        return QueryBuilder(pool), pool  # type: ignore[arg-type]
+
+    async def test_postgres_claims_in_a_single_materialised_statement(self) -> None:
+        builder, pool = self._builder(PostgresDialect())
+        await builder.claim_pending_tasks(limit=5, worker_id="w1", route="r1")
+        assert len(pool.statements) == 1
+        query, args = pool.statements[0]
+        # The locking read must be *materialised*: inside an UPDATE subquery
+        # PostgreSQL ignores the LIMIT for the rows it actually updates.
+        assert "WITH claimed AS MATERIALIZED" in query
+        assert "UPDATE conductor_tasks" in query
+        assert "SET status = 'processing'" in query
+        assert "RETURNING *" in query
+        assert "FOR UPDATE SKIP LOCKED" in query
+        assert "LIMIT $2" in query
+        assert "worker_id = $3" in query
+        # Bound in textual order: route, limit, worker_id.
+        assert args == ("r1", 5, "w1")
+        assert pool.transactions == 0
+
+    async def test_postgres_claim_without_route_binds_limit_then_worker(self) -> None:
+        builder, pool = self._builder(PostgresDialect())
+        await builder.claim_pending_tasks(limit=3, worker_id="w1")
+        assert pool.statements[0][1] == (3, "w1")
+
+    async def test_mysql_claims_inside_one_transaction(self) -> None:
+        builder, pool = self._builder(MYSQL, rows=[{"task_id": "t1"}, {"task_id": "t2"}])
+        claimed = await builder.claim_pending_tasks(limit=2, worker_id="w1")
+        assert [row["task_id"] for row in claimed] == ["t1", "t2"]
+        assert pool.transactions == 1
+        select_query, select_args = pool.statements[0]
+        update_query, update_args = pool.statements[1]
+        claimed_query, claimed_args = pool.statements[2]
+        assert "FOR UPDATE SKIP LOCKED" in select_query
+        assert "RETURNING" not in select_query.upper()
+        assert "ON CONFLICT" not in update_query.upper()
+        assert select_args == (2,)
+        # The write re-checks the status and binds the worker id first.
+        assert "WHERE status IN ('pending', 'retrying')" in update_query
+        assert update_args == ("w1", "t1", "t2")
+        assert claimed_args == ("w1", "t1", "t2")
+        assert "worker_id = %s" in claimed_query
+        assert update_query.count("%s") == len(update_args)
+
+    async def test_mysql_claim_without_candidates_skips_the_write(self) -> None:
+        builder, pool = self._builder(MYSQL, rows=[])
+        assert await builder.claim_pending_tasks(limit=2, worker_id="w1") == []
+        assert len(pool.statements) == 1
+
+    async def test_sqlite_claims_in_a_single_statement_without_locking(self) -> None:
+        builder, pool = self._builder(SQLITE, rows=[{"task_id": "t1"}])
+        await builder.claim_pending_tasks(limit=2, worker_id="w1")
+        assert len(pool.statements) == 1
+        query, args = pool.statements[0]
+        assert "WITH claimed AS MATERIALIZED" in query
+        assert "SET status = 'processing'" in query
+        assert "RETURNING *" in query
+        # SQLite has no row locking; writers are serialised by BEGIN IMMEDIATE,
+        # so the single statement above is already atomic.
+        assert "FOR UPDATE" not in query
+        assert args == (2, "w1")
+        assert query.count("?") == len(args)
+
+    async def test_claim_keeps_retrying_and_dependency_gate(self) -> None:
+        for dialect in (PostgresDialect(), MYSQL, SQLITE):
+            builder, pool = self._builder(dialect)
+            await builder.claim_pending_tasks(limit=1, worker_id="w1")
+            rendered = " ".join(query for query, _ in pool.statements)
+            assert "status IN ('pending', 'retrying')" in rendered
+            assert "d.status NOT IN ('completed', 'cancelled')" in rendered
+            assert "scheduled_for" in rendered
+
+    async def test_claim_rejects_an_empty_worker_id(self) -> None:
+        builder, _ = self._builder(MYSQL)
+        with pytest.raises(ValueError, match="worker_id must not be empty"):
+            await builder.claim_pending_tasks(limit=1, worker_id="  ")
+
+    async def test_release_claim_clears_the_claim_markers(self) -> None:
+        builder, pool = self._builder(MYSQL)
+        assert await builder.release_claim("t1") is True
+        query, args = pool.statements[0]
+        assert "SET status = 'pending', worker_id = NULL, started_at = NULL" in query
+        assert "AND status = 'processing'" in query
+        assert args == ("t1",)
+
+    async def test_release_claim_reports_an_unclaimed_task(self) -> None:
+        builder, _ = self._builder(MYSQL, rowcount=0)
+        assert await builder.release_claim("t1") is False
+
+    async def test_reclaim_stale_tasks_excludes_alive_workers(self) -> None:
+        builder, pool = self._builder(MYSQL, rows=[{"worker_id": "w-alive"}], rowcount=2)
+        assert await builder.reclaim_stale_tasks(60.0) == 2
+        select_query, select_args = pool.statements[0]
+        update_query, update_args = pool.statements[1]
+        assert "FROM conductor_workers" in select_query
+        assert "last_heartbeat >= %s" in select_query
+        assert "SET status = 'pending', worker_id = NULL, started_at = NULL" in update_query
+        assert "started_at < %s" in update_query
+        # An owner with no heartbeat row at all counts as dead too.
+        assert "worker_id IS NULL OR worker_id NOT IN (%s)" in update_query
+        # cutoff, then the alive worker id — in textual order.
+        assert update_args == (select_args[0], "w-alive")
+        assert update_query.count("%s") == len(update_args)
+
+    async def test_reclaim_stale_tasks_without_alive_workers(self) -> None:
+        builder, pool = self._builder(MYSQL, rows=[], rowcount=0)
+        assert await builder.reclaim_stale_tasks(60.0) == 0
+        update_query, update_args = pool.statements[1]
+        # No owner condition is needed when nothing is alive.
+        assert "NOT IN" not in update_query
+        assert "worker_id IS NULL OR" not in update_query
+        assert len(update_args) == 1
+        assert update_query.count("%s") == 1
+
+    async def test_reclaim_rejects_a_non_positive_window(self) -> None:
+        builder, _ = self._builder(MYSQL)
+        with pytest.raises(ValueError, match="must be > 0"):
+            await builder.reclaim_stale_tasks(0)
 
 
 # ===================================================================

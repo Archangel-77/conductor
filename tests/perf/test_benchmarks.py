@@ -219,11 +219,18 @@ class TestPollingLatency:
         ) as worker:
 
             timings_ms: list[float] = []
+            queries = worker._queries  # pylint: disable=protected-access
+            assert queries is not None
             for _ in range(PERF_SAMPLES_POLL):
                 start = time.perf_counter()
                 batch = await worker._poll_tasks()
                 timings_ms.append((time.perf_counter() - start) * 1000.0)
                 assert len(batch) == 10
+                # Polling now *claims* the rows, so put them back before the
+                # next sample (otherwise the queue empties and the sample
+                # measures a no-op poll).
+                for claimed in batch:
+                    await queries.update_task_status(claimed.task_id, "pending")
 
         avg = _assert_avg_below(timings_ms, PERF_MAX_POLL_MS)
         print(f"  poll roundtrip avg={avg:.3f}ms over {PERF_SAMPLES_POLL} samples")

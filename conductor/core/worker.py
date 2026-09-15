@@ -68,6 +68,12 @@ logger = logging.getLogger("conductor.core.worker")
 # task payload and returns an optional result dict.
 HandlerFunc = Callable[[dict[str, Any]], Awaitable[Optional[dict[str, Any]]]]
 
+_POLL_BATCH_SIZE = 10
+"""Maximum number of tasks claimed in a single poll cycle."""
+
+_STALE_CLAIM_FLOOR = 30.0
+"""Minimum age before an unowned/orphaned claim is reclaimed (seconds)."""
+
 
 class Worker:
     """Poll-based task worker that dispatches work to registered handlers.
@@ -112,6 +118,7 @@ class Worker:
         circuit_breaker_config: Optional[CircuitBreakerConfig] = None,
         circuit_breaker_overrides: Optional[dict[str, CircuitBreakerConfig]] = None,
         tracing_config: Optional[TracingConfig] = None,
+        stale_claim_timeout: Optional[float] = None,
     ) -> None:
         # Worker identity
         hostname = get_hostname()
@@ -123,6 +130,15 @@ class Worker:
         # Configuration
         self._concurrency = concurrency
         self._poll_interval = poll_interval
+        # Claims are taken atomically, so a crashed worker can strand a task in
+        # 'processing'; anything older than this (with no heartbeat from its
+        # owner) is returned to 'pending' by the next poll.
+        self._stale_claim_timeout = (
+            stale_claim_timeout
+            if stale_claim_timeout is not None
+            else max(3.0 * heartbeat_interval, _STALE_CLAIM_FLOOR)
+        )
+        self._next_reclaim_at = 0.0
         # ``None`` means the worker polls *all* routes (no route filter).
         self._routes: Optional[list[str]] = list(routes) if routes else None
         self._heartbeat_interval = heartbeat_interval
@@ -589,17 +605,26 @@ class Worker:
     # ------------------------------------------------------------------
 
     async def _poll_and_execute(self) -> None:
-        """Poll for pending tasks and execute them.
+        """Claim eligible tasks and execute them.
 
-        This is the inner loop body: 1) query the database for pending
-        tasks, 2) acquire the semaphore for each, 3) spawn execution
-        tasks.
+        This is the inner loop body: 1) reclaim claims left behind by dead
+        workers (throttled), 2) atomically claim eligible tasks, 3) acquire the
+        semaphore for each, 4) spawn execution tasks.
         """
-        tasks = await self._poll_tasks()
+        await self._maybe_reclaim_stale_claims()
+
+        # Never claim more rows than this worker can start right now: a claim
+        # moves the row to 'processing', so over-claiming would hide work from
+        # other workers while it waits for a free slot.
+        capacity = self._concurrency - len(self._in_flight_tasks)
+        if capacity <= 0:
+            return
+
+        tasks = await self._poll_tasks(limit=min(_POLL_BATCH_SIZE, capacity))
         if not tasks:
             return
 
-        logger.debug("Polled %d pending task(s).", len(tasks))
+        logger.debug("Claimed %d task(s).", len(tasks))
 
         for task in tasks:
             # Acquire the semaphore before spawning
@@ -612,13 +637,19 @@ class Worker:
             self._in_flight_tasks.add(exec_task)
             exec_task.add_done_callback(self._on_execution_done)
 
-    async def _poll_tasks(self) -> list[Task]:
-        """Query the database for pending tasks eligible for processing.
+    async def _poll_tasks(self, limit: int = _POLL_BATCH_SIZE) -> list[Task]:
+        """Atomically claim up to *limit* tasks that are eligible to run.
 
-        If the worker polls *all* routes (``routes=None``), a single
-        unfiltered query is used and the database ordering (``priority DESC,
-        created_at ASC``) is preserved.  Otherwise each configured route is
-        polled and the combined batch is re-sorted by priority.
+        Claiming moves the rows to ``processing`` in the same statement (or
+        transaction) that selects them, so two workers polling concurrently can
+        never receive the same task.
+
+        If the worker polls *all* routes (``routes=None``) a single unfiltered
+        claim is used; otherwise each configured route is claimed in turn, never
+        claiming more than *limit* rows in total.
+
+        Args:
+            limit: Maximum number of tasks to claim in this poll cycle.
 
         Returns:
             A list of ``Task`` objects (may be empty).
@@ -627,25 +658,43 @@ class Worker:
         assert queries is not None
 
         if self._routes is None:
-            rows = await queries.select_pending_tasks(limit=10, offset=0)
+            rows = await queries.claim_pending_tasks(
+                limit=limit,
+                worker_id=self._worker_id,
+            )
             return [Task.from_dict(row) for row in rows]
 
-        all_tasks: list[Task] = []
+        claimed: list[Task] = []
         for route in self._routes:
-            rows = await queries.select_pending_tasks(
-                limit=10,
-                offset=0,
+            remaining = limit - len(claimed)
+            if remaining <= 0:
+                break
+            rows = await queries.claim_pending_tasks(
+                limit=remaining,
+                worker_id=self._worker_id,
                 route=route,
             )
-            for row in rows:
-                all_tasks.append(Task.from_dict(row))
+            claimed.extend(Task.from_dict(row) for row in rows)
 
         # Sort all tasks by priority DESC, created_at ASC (mimicking DB order)
-        all_tasks.sort(key=lambda t: (-t.priority, t.created_at))
+        claimed.sort(key=lambda t: (-t.priority, t.created_at))
+        return claimed[:limit]
 
-        # Limit batch size (cap at 10 per poll cycle)
-        batch_size = min(len(all_tasks), 10)
-        return all_tasks[:batch_size]
+    async def _maybe_reclaim_stale_claims(self) -> None:
+        """Reclaim stranded claims, at most once per stale-claim window."""
+        if self._queries is None:
+            return
+        now = time.monotonic()
+        if now < self._next_reclaim_at:
+            return
+        self._next_reclaim_at = now + self._stale_claim_timeout
+        reclaimed = await self._queries.reclaim_stale_tasks(self._stale_claim_timeout)
+        if reclaimed:
+            logger.warning(
+                "Reclaimed %d task(s) stranded by dead workers.",
+                reclaimed,
+                extra={"count": reclaimed},
+            )
 
     # ------------------------------------------------------------------
     # Task execution
@@ -693,8 +742,11 @@ class Worker:
         if breaker is not None and not breaker.allow_request():
             inc_tasks_rejected(task_type)
             self._set_circuit_breaker_metric(task_type, breaker)
+            # The task was claimed (status 'processing') while polling, so the
+            # claim has to be handed back — otherwise it would be stranded.
+            await queries.release_claim(task.task_id)
             logger.warning(
-                "Circuit open for task_type '%s'; skipping task %s (leaving pending).",
+                "Circuit open for task_type '%s'; releasing claim on task %s (left pending).",
                 task_type,
                 task.task_id,
                 extra={"task_id": task.task_id, "task_type": task_type},
