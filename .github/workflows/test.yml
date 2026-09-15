@@ -179,6 +179,52 @@ jobs:
       - name: Run unit tests and the backend parity matrix (${{ matrix.server }})
         run: pytest tests/unit tests/integration/test_backend_matrix.py --no-cov
 
+  package:
+    name: Package install smoke test
+    runs-on: ubuntu-latest
+    # A missing *distribution* dependency is invisible to the test suite: every
+    # dev and CI environment installs the `dev` extra, which pulls
+    # grpcio-tools -> protobuf. That is how v0.2.0 shipped a wheel whose
+    # `import conductor` raised ModuleNotFoundError. Build the artefacts and
+    # install them in bare virtualenvs (no extras, then every extra), always
+    # importing from outside the checkout so the source tree cannot mask a
+    # packaging defect.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Build sdist and wheel
+        run: |
+          pip install --upgrade build
+          python -m build
+          ls -l dist/
+
+      - name: Install the wheel with no extras and import it
+        working-directory: /tmp
+        run: |
+          python -m venv bare
+          WHEEL=$(ls "${GITHUB_WORKSPACE}"/dist/*.whl)
+          ./bare/bin/pip install "${WHEEL}"
+          ./bare/bin/python -c "import conductor; print('imported', conductor.__version__)"
+          ./bare/bin/conductor --version
+
+      - name: Install the optional extras and import each backend
+        working-directory: /tmp
+        run: |
+          python -m venv extras
+          WHEEL=$(ls "${GITHUB_WORKSPACE}"/dist/*.whl)
+          ./extras/bin/pip install "${WHEEL}[sqlite,mysql,otel]"
+          ./extras/bin/python -c "
+          from conductor.db.backends.mysql import MySqlPool
+          from conductor.db.backends.sqlite import SqlitePool
+          from conductor.observability import tracing
+          print('extras ok:', SqlitePool.__name__, MySqlPool.__name__, tracing.is_available())
+          "
+
   perf:
     name: Performance benchmarks
     runs-on: ubuntu-latest

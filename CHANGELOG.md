@@ -73,6 +73,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`pip install conductor-task-queue` produced an unimportable package** — the
+  generated gRPC stubs (`conductor/grpc/conductor_pb2.py`) import
+  `google.protobuf`, but only `grpcio` was declared and `grpcio` does not pull
+  that distribution in, so a clean install failed at `import conductor` with
+  `ModuleNotFoundError: No module named 'google'`. Every dev and CI environment
+  hid this because the `dev` extra installs `grpcio-tools` → `protobuf`.
+  `protobuf>=7.35.1` (the version `conductor_pb2.py` validates at runtime) is now
+  a core dependency. **0.2.0 on PyPI is affected the same way** and cannot be
+  imported after a plain install. Guards added: `tests/unit/test_packaging.py`
+  (every third-party import under `conductor/` must be declared as a core
+  dependency or in an extra; `pyproject.toml`/`setup.py` must declare the same
+  requirements; the declared protobuf floor must be ≥ the gencode version) and a
+  CI `package` job that builds the artefacts and imports the wheel in bare
+  virtualenvs, with and without extras.
 - MySQL: `mark_dependents_blocked()` bound its parameters out of order on the
   no-`RETURNING` path (`error_message` precedes the `IN` list textually, but the
   task IDs were passed first), so the `UPDATE` matched no rows — a failed

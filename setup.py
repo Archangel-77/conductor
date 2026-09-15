@@ -35,6 +35,8 @@ setup(
         "python-dotenv>=1.0.0",
         "croniter>=1.4",
         "grpcio>=1.60",
+        # Runtime for the generated gRPC stubs; grpcio does not pull it in.
+        "protobuf>=7.35.1",
         "fastapi>=0.110",
         "uvicorn>=0.29",
     ],

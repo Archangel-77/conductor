@@ -31,6 +31,11 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "croniter>=1.4",
     "grpcio>=1.60",
+    # Runtime for the generated gRPC stubs (conductor/grpc/conductor_pb2.py).
+    # grpcio does NOT pull protobuf in, and the stubs call
+    # ValidateProtobufRuntimeVersion(), so the floor must match the gencode
+    # version (see tests/unit/test_packaging.py).
+    "protobuf>=7.35.1",
     "fastapi>=0.110",
     "uvicorn>=0.29",
 ]
