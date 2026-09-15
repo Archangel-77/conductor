@@ -318,6 +318,19 @@ class MySqlDialect(SqlDialect):
                 result[key] = self.decode_json_value(value)
         return result
 
+    def is_retryable_transaction_error(self, exc: BaseException) -> bool:
+        """Report InnoDB deadlocks and lock-wait timeouts as retryable.
+
+        A task claim locks the rows it scans (``FOR UPDATE``), so two workers
+        claiming at the same moment can deadlock (error 1213) or hit the lock
+        wait timeout (1205).  InnoDB has already rolled the transaction back, so
+        the claim can simply run again.
+        """
+        if not isinstance(exc, asyncmy.errors.OperationalError):
+            return False
+        code = exc.args[0] if exc.args else None
+        return code in (1205, 1213)
+
 
 class MySqlConnection:
     """Exposes an asyncmy connection through ``ConnectionProtocol``."""
@@ -571,7 +584,7 @@ class MySqlPool:
             raise DatabaseError("Pool has been closed.")
 
         try:
-            raw = await asyncio.wait_for(self._pool.acquire(), timeout=self._timeout)
+            raw = await self._acquire_connection()
         except asyncio.TimeoutError as exc:
             raise DatabaseError(
                 f"Timed out waiting for a MySQL connection ({self._timeout}s)"
@@ -584,6 +597,48 @@ class MySqlPool:
         finally:
             if self._pool is not None and not self._closed:
                 self._pool.release(raw)
+
+    async def _acquire_connection(self) -> asyncmy.Connection:
+        """Acquire a raw connection, re-checking the pool until the deadline.
+
+        ``asyncmy``'s pool can lose a wakeup when a waiter is cancelled: the
+        released connection goes back to the free list, but the waiter that was
+        notified about it may already have been cancelled by ``wait_for`` (seen
+        on CPython 3.11, where the notification is consumed and no other waiter
+        is woken).  A *fresh* acquire checks the free list before parking, so
+        the acquisition is retried in short slices until the timeout budget is
+        spent.
+
+        Returns:
+            A connection from the pool.
+
+        Raises:
+            asyncio.TimeoutError: If no connection becomes available in time.
+        """
+        pool = self._pool
+        assert pool is not None
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._timeout
+        attempts = 0
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            # Retry immediately when the pool reports a free connection (the
+            # lost-wakeup case); otherwise poll the pool in one-second slices.
+            slice_timeout = min(remaining, 0.05 if pool.freesize > 0 else 1.0)
+            try:
+                return await asyncio.wait_for(pool.acquire(), timeout=slice_timeout)
+            except asyncio.TimeoutError:
+                attempts += 1
+                if attempts == 1 or attempts % 10 == 0:
+                    logger.debug(
+                        "Retrying MySQL pool acquire (attempt %d, %d free, %.2fs left).",
+                        attempts,
+                        pool.freesize,
+                        remaining,
+                    )
 
     @asynccontextmanager
     async def transaction(self) -> AsyncGenerator[ConnectionProtocol, None]:

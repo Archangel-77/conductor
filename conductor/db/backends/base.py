@@ -279,3 +279,19 @@ class SqlDialect(ABC):
             if token.isdigit():
                 return int(token)
         return 0
+
+    def is_retryable_transaction_error(self, exc: BaseException) -> bool:
+        """Whether *exc* aborts a transaction that is safe to retry.
+
+        Backends with row-level locking can abort a transaction to break a
+        deadlock; the transaction is already rolled back, so the caller may
+        simply run it again.  PostgreSQL and SQLite never need this (PostgreSQL
+        serialises claims in a single statement), so the default is ``False``.
+
+        Args:
+            exc: The exception raised by the failed statement.
+
+        Returns:
+            ``True`` if the operation should be retried.
+        """
+        return False
