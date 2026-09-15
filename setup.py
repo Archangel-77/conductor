@@ -39,6 +39,19 @@ setup(
         "uvicorn>=0.29",
     ],
     extras_require={
+        # Optional database backends (PostgreSQL is a core dependency).
+        "sqlite": [
+            "aiosqlite>=0.19",
+        ],
+        "mysql": [
+            "asyncmy>=0.2",
+        ],
+        # Distributed tracing (no-op without it).
+        "otel": [
+            "opentelemetry-api>=1.24",
+            "opentelemetry-sdk>=1.24",
+            "opentelemetry-exporter-otlp-proto-http>=1.24",
+        ],
         "dev": [
             "setuptools>=68.0.0",
             "build>=1.0.0",

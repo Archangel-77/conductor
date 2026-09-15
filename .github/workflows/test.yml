@@ -23,7 +23,7 @@ jobs:
           cache: pip
 
       - name: Install package with dev extras
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,sqlite,otel,mysql]"
 
       - name: Formatting (black)
         run: black --check conductor/ tests/ scripts/ examples/
@@ -92,7 +92,7 @@ jobs:
           cache: pip
 
       - name: Install package with dev extras
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,sqlite,otel,mysql]"
 
       - name: Run tests (unit, integration, e2e)
         run: pytest tests/unit tests/integration tests/e2e -m "not perf" --cov-report=xml --cov-report=term-missing
@@ -103,6 +103,81 @@ jobs:
           files: coverage.xml
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
+
+  sqlite:
+    name: SQLite backend (no services)
+    runs-on: ubuntu-latest
+    # Proves the embedded backend works with no database server at all: the
+    # parity matrix runs the same flows as the PostgreSQL job above.
+    env:
+      CONDUCTOR_TEST_DATABASE_URLS: sqlite:////tmp/conductor_test.db
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install package with dev, sqlite and mysql extras
+        run: pip install -e ".[dev,sqlite,mysql]"
+
+      - name: Run unit tests and the backend parity matrix (SQLite)
+        run: pytest tests/unit tests/integration/test_backend_matrix.py --no-cov
+
+  mysql:
+    name: MySQL backend (${{ matrix.server }})
+    runs-on: ubuntu-latest
+    # Proves the MySQL/MariaDB backend against a real server: the minimum
+    # supported MySQL (8.0, where named CHECK constraints landed in 8.0.16),
+    # the current 8.4 LTS, and MariaDB (10.6 is the minimum because
+    # ``FOR UPDATE SKIP LOCKED`` arrived there — MariaDB 10.5 is rejected at
+    # connect() by validate_server_version).
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - server: MySQL 8.0
+            image: mysql:8.0
+            health-cmd: mysqladmin ping -h 127.0.0.1 -uconductor -pconductor
+          - server: MySQL 8.4
+            image: mysql:8.4
+            health-cmd: mysqladmin ping -h 127.0.0.1 -uconductor -pconductor
+          - server: MariaDB 11
+            image: mariadb:11
+            # The MariaDB image ships mariadb-admin, not mysqladmin.
+            health-cmd: mariadb-admin ping -h 127.0.0.1 -uconductor -pconductor
+    services:
+      mysql:
+        image: ${{ matrix.image }}
+        # Both images accept the MYSQL_* variable names.
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: conductor_test
+          MYSQL_USER: conductor
+          MYSQL_PASSWORD: conductor
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "${{ matrix.health-cmd }}"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CONDUCTOR_TEST_DATABASE_URLS: mysql://conductor:conductor@127.0.0.1:3306/conductor_test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install package with dev, sqlite and mysql extras
+        run: pip install -e ".[dev,sqlite,mysql]"
+
+      - name: Run unit tests and the backend parity matrix (${{ matrix.server }})
+        run: pytest tests/unit tests/integration/test_backend_matrix.py --no-cov
 
   perf:
     name: Performance benchmarks

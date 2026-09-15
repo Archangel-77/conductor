@@ -31,6 +31,7 @@ message TaskRequest {
   string task_type = 2; // handler to execute
   bytes payload = 3;    // JSON-encoded payload dict
   bool persist = 4;     // if true, record the outcome in conductor_tasks
+  string traceparent = 5; // optional W3C traceparent to continue the caller's trace
 }
 
 // The result of executing a task.
@@ -39,6 +40,7 @@ message TaskResponse {
   bool success = 2;
   bytes result = 3;     // JSON-encoded result dict (on success)
   string error = 4;     // error message (on failure)
+  string traceparent = 5; // traceparent of the span that executed the task
 }
 
 // A request to register a handler for a task_type.

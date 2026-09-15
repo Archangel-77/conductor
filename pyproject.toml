@@ -39,6 +39,20 @@ dependencies = [
 conductor = "conductor.cli:main"
 
 [project.optional-dependencies]
+# Optional database backends.  PostgreSQL (asyncpg) is a core dependency;
+# SQLite and MySQL/MariaDB are installed only when needed.
+sqlite = [
+    "aiosqlite>=0.19",
+]
+mysql = [
+    "asyncmy>=0.2",
+]
+# Distributed tracing.  Without this extra every tracing call is a no-op.
+otel = [
+    "opentelemetry-api>=1.24",
+    "opentelemetry-sdk>=1.24",
+    "opentelemetry-exporter-otlp-proto-http>=1.24",
+]
 dev = [
     "setuptools>=68.0.0",
     "build>=1.0.0",

@@ -29,6 +29,7 @@ import grpc.aio as grpc_aio
 from conductor.core.models import TaskStatus, generate_task_id
 from conductor.core.worker import Worker, _call_handler
 from conductor.grpc import conductor_pb2, conductor_pb2_grpc
+from conductor.observability import tracing
 
 logger = logging.getLogger("conductor.grpc.server")
 
@@ -94,17 +95,37 @@ class ConductorWorkerServicer:
         if request.persist:
             return await self._process_persisted(request, task_type, payload)
 
-        result, handler_error = await _call_handler(handler, payload)
+        # Pure execution still participates in the caller's trace: the span is
+        # parented to the traceparent the client sent (if any) and its own
+        # traceparent is echoed back so the caller can link to it.
+        response_traceparent = ""
+        with tracing.span(
+            tracing.SPAN_EXECUTE,
+            parent=tracing.extract_traceparent(request.traceparent or None),
+            attributes={
+                tracing.ATTR_TASK_ID: request.task_id,
+                tracing.ATTR_TASK_TYPE: task_type,
+            },
+        ):
+            result, handler_error = await _call_handler(handler, payload)
+            if handler_error is not None:
+                tracing.record_error(str(handler_error), handler_error)
+            else:
+                tracing.mark_success()
+            response_traceparent = tracing.current_traceparent() or ""
+
         if handler_error is not None:
             return conductor_pb2.TaskResponse(
                 task_id=request.task_id,
                 success=False,
                 error=str(handler_error),
+                traceparent=response_traceparent,
             )
         return conductor_pb2.TaskResponse(
             task_id=request.task_id,
             success=True,
             result=json.dumps(result or {}, default=str).encode("utf-8"),
+            traceparent=response_traceparent,
         )
 
     async def _process_persisted(
@@ -123,6 +144,7 @@ class ConductorWorkerServicer:
             task_id=request.task_id or generate_task_id(),
             task_type=task_type,
             payload=payload,
+            traceparent=request.traceparent or None,
         )
 
         if task is None:
@@ -138,6 +160,7 @@ class ConductorWorkerServicer:
             success=success,
             result=(json.dumps(task.result or {}, default=str).encode("utf-8") if success else b""),
             error=task.error_message or ("" if success else "Task failed"),
+            traceparent=task.traceparent or "",
         )
 
     async def RegisterHandler(

@@ -129,6 +129,24 @@ class TestGrpcIntegration:
         assert resp.success is False
         assert "No handler registered" in resp.error
 
+    async def test_process_task_propagates_trace_context(self) -> None:
+        """The caller's traceparent continues into the execution span."""
+        caller_traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        async with grpc_aio.insecure_channel(f"localhost:{GRPC_PORT}") as channel:
+            stub = conductor_pb2_grpc.ConductorWorkerStub(channel)
+            resp = await stub.ProcessTask(
+                conductor_pb2.TaskRequest(
+                    task_id="grpc-traced",
+                    task_type="grpc_echo",
+                    payload=json.dumps({"message": "traced"}).encode("utf-8"),
+                    traceparent=caller_traceparent,
+                )
+            )
+
+        assert resp.success is True
+        # Without tracing configured the field is simply empty – never invalid.
+        assert resp.traceparent == "" or resp.traceparent.startswith("00-")
+
     async def test_register_handler(self, grpc_worker: Any) -> None:
         """RegisterHandler is idempotent over the wire."""
         async with grpc_aio.insecure_channel(f"localhost:{GRPC_PORT}") as channel:

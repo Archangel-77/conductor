@@ -4,8 +4,12 @@ Shared test fixtures and configuration for Conductor tests.
 Divided into two tiers:
 
 - **Unit-test fixtures** – no database required
-- **Integration-test fixtures** – require a running PostgreSQL instance
-  (skipped automatically if the database is unavailable)
+- **Integration-test fixtures** – require a reachable database
+  (skipped automatically if the configured database is unavailable)
+
+The backend is selected by the DSN in ``CONDUCTOR_TEST_DATABASE_URL``: the
+PostgreSQL default for the main suite, or ``sqlite:///…`` to run against an
+embedded database with no server at all.
 """
 
 # pylint: disable=import-outside-toplevel
@@ -38,13 +42,47 @@ Override via the ``CONDUCTOR_TEST_DATABASE_URL`` environment variable.
 
 
 def db_available() -> bool:
-    """Return ``True`` if the test database appears reachable.
+    """Return ``True`` if the configured test database looks usable.
 
-    This is a lightweight check that tests whether the env variable
-    looks reasonable.  Individual fixtures will fail with a clear
-    skip message when the database is not running.
+    The DSN scheme is validated only – this is a cheap check that keeps the
+    integration suite skipped on machines without a database.  Any supported
+    backend (PostgreSQL, SQLite, MySQL) passes; the fixtures themselves report
+    unreachable databases with a clear skip message.
     """
-    return bool(TEST_DATABASE_URL and TEST_DATABASE_URL.startswith("postgresql"))
+    if not TEST_DATABASE_URL:
+        return False
+
+    from conductor.db.backends.registry import detect_backend
+    from conductor.exceptions import ConductorConnectionError
+
+    try:
+        detect_backend(TEST_DATABASE_URL)
+    except ConductorConnectionError:
+        return False
+    return True
+
+
+CONDUCTOR_TABLES: tuple[str, ...] = (
+    "conductor_retries",
+    "conductor_dead_letter",
+    "conductor_tasks",
+    "conductor_workers",
+    "conductor_recurring_tasks",
+)
+"""Every table holding test data, in foreign-key-safe deletion order."""
+
+
+async def truncate_all(pool: Any) -> None:
+    """Delete every row from the Conductor tables.
+
+    ``conductor_retries`` has a foreign key onto ``conductor_tasks``, so rows
+    are removed dependents-first.  Portable across backends (no ``TRUNCATE``).
+
+    Args:
+        pool: A connected pool – any backend.
+    """
+    for table in CONDUCTOR_TABLES:
+        await pool.execute(f"DELETE FROM {table}")
 
 
 # ---------------------------------------------------------------------------
@@ -171,8 +209,4 @@ async def auto_cleanup(  # noqa: N802  # pylint: disable=redefined-outer-name
     yield
 
     if db_pool.is_connected:
-        await db_pool.execute("DELETE FROM conductor_retries")
-        await db_pool.execute("DELETE FROM conductor_dead_letter")
-        await db_pool.execute("DELETE FROM conductor_tasks")
-        await db_pool.execute("DELETE FROM conductor_workers")
-        await db_pool.execute("DELETE FROM conductor_recurring_tasks")
+        await truncate_all(db_pool)

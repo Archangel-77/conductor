@@ -25,6 +25,7 @@ _ENV_VARS = [
     "DB_MAX_SIZE",
     "DB_TIMEOUT",
     "DB_COMMAND_TIMEOUT",
+    "DB_BUSY_TIMEOUT",
     "HEARTBEAT_INTERVAL",
     "GRACEFUL_SHUTDOWN_TIMEOUT",
     "METRICS_PORT",
@@ -35,6 +36,11 @@ _ENV_VARS = [
     "CONDUCTOR_CIRCUIT_BREAKER_TIMEOUT",
     "CONDUCTOR_CIRCUIT_BREAKER_HALF_OPEN_ATTEMPTS",
     "CONDUCTOR_HANDLERS_MODULE",
+    "TRACING_ENABLED",
+    "TRACING_EXPORTER",
+    "OTEL_SERVICE_NAME",
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "TRACING_SAMPLE_RATIO",
 ]
 
 
@@ -176,4 +182,37 @@ class TestBuildWorker:
         d = s.to_dict()
         assert d["database_url"] == "postgresql://u:p@h/db"
         assert d["concurrency"] == 10
+        assert d["db_busy_timeout"] == 5.0
         assert "handlers_module" in d
+        assert d["tracing_enabled"] is False
+        assert d["tracing_exporter"] == "otlp"
+
+    def test_tracing_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _unset_all(monkeypatch)
+        monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@h/db")
+        monkeypatch.setenv("TRACING_ENABLED", "true")
+        monkeypatch.setenv("TRACING_EXPORTER", "CONSOLE")
+        monkeypatch.setenv("OTEL_SERVICE_NAME", "my-service")
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318/v1/traces")
+        monkeypatch.setenv("TRACING_SAMPLE_RATIO", "0.25")
+
+        s = WorkerSettings.from_env()
+        assert s.tracing_enabled is True
+        assert s.tracing_exporter == "console"
+        assert s.otel_service_name == "my-service"
+        assert s.otel_exporter_otlp_endpoint == "http://collector:4318/v1/traces"
+        assert s.tracing_sample_ratio == 0.25
+
+    def test_build_worker_tracing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _unset_all(monkeypatch)
+        monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@h/db")
+
+        # Disabled: no tracing configuration is handed to the worker.
+        assert WorkerSettings.from_env().build_worker()._tracing_config is None
+
+        monkeypatch.setenv("TRACING_ENABLED", "true")
+        monkeypatch.setenv("TRACING_EXPORTER", "otlp")
+        worker = WorkerSettings.from_env().build_worker()
+        assert worker._tracing_config is not None
+        assert worker._tracing_config.enabled is True
+        assert worker._tracing_config.exporter == "otlp"

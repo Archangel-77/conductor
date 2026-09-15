@@ -1,9 +1,18 @@
 """
 Type-safe SQL query builders for Conductor.
 
-Uses raw SQL with asyncpg parameter placeholders (``$1``, ``$2``, …)
-wrapped in small builder classes.  Every public method validates its
-arguments before constructing a query.
+SQL is rendered through the pool's ``SqlDialect``, so the same builders run on
+PostgreSQL, SQLite and (later) MySQL.  Two conventions matter throughout:
+
+* **Placeholders are rendered in the textual order they appear** in the
+  statement.  Numbered backends (``$1``) do not care, but positional backends
+  (``?``) bind strictly by position, so a statement must never reference a
+  higher-numbered parameter before a lower-numbered one.
+* **Affected-row counts are normalised** through
+  ``SqlDialect.normalize_rowcount``, so backend-specific command tags never leak
+  into callers.
+
+Every public method validates its arguments before constructing a query.
 """
 
 from __future__ import annotations
@@ -15,10 +24,79 @@ from typing import Any, Optional, cast
 
 from croniter import croniter
 
+from conductor.db.backends.base import PoolProtocol, SqlDialect
+from conductor.db.backends.postgres import PostgresDialect
 from conductor.db.connection import DatabasePool
 from conductor.exceptions import TaskError
 
 logger = logging.getLogger("conductor.db.queries")
+
+TASK_COLUMNS: tuple[str, ...] = (
+    "task_id",
+    "task_type",
+    "payload",
+    "status",
+    "priority",
+    "route",
+    "attempt",
+    "max_retries",
+    "retry_policy",
+    "depends_on",
+    "scheduled_for",
+    "worker_id",
+    "result",
+    "error_message",
+    "created_at",
+    "started_at",
+    "completed_at",
+    "traceparent",
+)
+"""``conductor_tasks`` columns in insert order."""
+
+JSON_TASK_COLUMNS = frozenset({"payload", "retry_policy", "result"})
+"""Task columns that must be cast to the backend's JSON type."""
+
+DEAD_LETTER_COLUMNS: tuple[str, ...] = (
+    "task_id",
+    "task_type",
+    "payload",
+    "error_message",
+    "attempts",
+    "retry_policy",
+    "route",
+    "priority",
+    "depends_on",
+    "moved_at",
+    "discarded",
+    "discard_reason",
+    "discarded_at",
+    "traceparent",
+)
+"""``conductor_dead_letter`` columns in insert order."""
+
+RECURRING_COLUMNS: tuple[str, ...] = (
+    "id",
+    "task_type",
+    "payload",
+    "cron_expression",
+    "route",
+    "priority",
+    "retry_policy",
+    "enabled",
+    "next_run_at",
+    "last_run_at",
+    "created_at",
+)
+"""``conductor_recurring_tasks`` columns in insert order."""
+
+
+def _task_values(dialect: SqlDialect) -> str:
+    """Render the ``VALUES`` list for a task insert (17 columns)."""
+    rendered = [
+        (dialect.json_param(index) if column in JSON_TASK_COLUMNS else dialect.placeholder(index))
+        for index, column in enumerate(TASK_COLUMNS, start=1)
+    ]
+    return ", ".join(rendered)
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +142,18 @@ def _validate_cron_expression(expression: Any) -> None:
         raise ValueError(f"Invalid cron expression '{expression}': {exc}") from exc
 
 
+def _pool_dialect(pool: Any) -> SqlDialect:
+    """Return the SQL dialect of *pool*.
+
+    Falls back to PostgreSQL when the pool is a duck-typed double (unit tests
+    pass ``AsyncMock`` objects in place of a real pool).
+    """
+    dialect = getattr(pool, "dialect", None)
+    if isinstance(dialect, SqlDialect):
+        return dialect
+    return PostgresDialect()
+
+
 # ---------------------------------------------------------------------------
 # QueryBuilder
 # ---------------------------------------------------------------------------
@@ -76,10 +166,19 @@ class QueryBuilder:
     fields, primitives).  No knowledge of the caller's model classes is
     required – but the helper methods expect dictionaries with the same
     keys used in the schema (see ``schema.py``).
+
+    Args:
+        pool: The connection pool (its dialect renders every statement).
+        dialect: Optional dialect override; defaults to the pool's dialect.
     """
 
-    def __init__(self, pool: DatabasePool) -> None:
-        self._pool = pool
+    def __init__(
+        self,
+        pool: DatabasePool | PoolProtocol,
+        dialect: Optional[SqlDialect] = None,
+    ) -> None:
+        self._pool: Any = pool
+        self._dialect: SqlDialect = dialect or _pool_dialect(pool)
 
     # ==================================================================
     # Task queries
@@ -102,29 +201,18 @@ class QueryBuilder:
             task: The task dictionary to insert.
             conn: Optional explicit connection/transaction to use (so the
                 caller can hold locks across a transaction).
+
+        Raises:
+            TaskError: If a task with the same ``task_id`` already exists.
         """
         _validate_not_empty(task.get("task_id"), "task_id")
         _validate_not_empty(task.get("task_type"), "task_type")
 
-        query = """
-            INSERT INTO conductor_tasks (
-                task_id, task_type, payload, status, priority, route,
-                attempt, max_retries, retry_policy, depends_on, scheduled_for,
-                worker_id, result, error_message, created_at,
-                started_at, completed_at
-            ) VALUES (
-                $1, $2, $3::jsonb, $4, $5, $6,
-                $7, $8, $9::jsonb, $10, $11,
-                $12, $13::jsonb, $14, $15,
-                $16, $17
-            )
-            ON CONFLICT (task_id) DO NOTHING
-            RETURNING task_id
-        """
-
-        target = conn if conn is not None else self._pool
-        row = await target.fetchrow(
-            query,
+        dialect = self._dialect
+        value_list = _task_values(dialect)
+        conflict = dialect.insert_ignore(["task_id"])
+        columns = ", ".join(TASK_COLUMNS)
+        values = (
             task["task_id"],
             task["task_type"],
             _json(task.get("payload", {})),
@@ -142,20 +230,49 @@ class QueryBuilder:
             task.get("created_at", datetime.now(timezone.utc)),
             task.get("started_at"),
             task.get("completed_at"),
+            task.get("traceparent"),
         )
+        target = conn if conn is not None else self._pool
+        conflicting = f"Task '{task['task_id']}' already exists"
 
-        if row is None:
-            raise TaskError(f"Task '{task['task_id']}' already exists")
+        if dialect.supports_returning:
+            query = f"""
+                INSERT INTO conductor_tasks (
+                    {columns}
+                ) VALUES (
+                    {value_list}
+                )
+                {conflict}
+                RETURNING task_id
+            """
+            row = await target.fetchrow(query, *values)
+            if row is None:
+                raise TaskError(conflicting)
+        else:
+            # No RETURNING (MySQL): the conflict clause is a no-op update, so an
+            # affected-row count of 0 means the row already existed.
+            query = f"""
+                INSERT INTO conductor_tasks (
+                    {columns}
+                ) VALUES (
+                    {value_list}
+                )
+                {conflict}
+            """
+            result = await target.execute(query, *values)
+            if dialect.normalize_rowcount(result) == 0:
+                raise TaskError(conflicting)
 
-        return cast(str, row["task_id"])
+        return cast(str, task["task_id"])
 
     async def select_task(self, task_id: str) -> Optional[dict[str, Any]]:
         """Fetch a single task by its ID, returning a dict or ``None``."""
         _validate_not_empty(task_id, "task_id")
 
-        query = "SELECT * FROM conductor_tasks WHERE task_id = $1"
+        dialect = self._dialect
+        query = f"SELECT * FROM conductor_tasks WHERE task_id = {dialect.placeholder(1)}"
         row = await self._pool.fetchrow(query, task_id)
-        return _row_to_dict(row) if row else None
+        return self._row_to_dict(row) if row else None
 
     async def select_pending_tasks(
         self,
@@ -163,54 +280,67 @@ class QueryBuilder:
         offset: int = 0,
         route: Optional[str] = None,
     ) -> list[dict[str, Any]]:
-        """Fetch pending tasks that are eligible for processing.
+        """Fetch tasks that are eligible for processing.
 
         Filters by:
-        - ``status = 'pending'``
+
+        - ``status IN ('pending', 'retrying')`` — a retry is a scheduled task
+          waiting for its backoff delay, so it must be claimable again
         - ``scheduled_for`` is ``NULL`` or in the past
+        - every entry in ``depends_on`` is satisfied (``completed``/``cancelled``)
         - optional ``route`` filter
 
-        Orders by ``priority DESC, created_at ASC``.
-        Uses ``FOR UPDATE SKIP LOCKED`` for atomic poll semantics.
+        Orders by ``priority DESC, created_at ASC`` and claims the rows with
+        ``FOR UPDATE SKIP LOCKED`` (a no-op clause on backends without row
+        locking).
+
+        Args:
+            limit: Maximum number of tasks to return.
+            offset: Number of tasks to skip.
+            route: Optional route filter.
+
+        Raises:
+            ValueError: If ``limit``/``offset`` are invalid.
         """
         if limit < 1:
             raise ValueError("limit must be >= 1")
         if offset < 0:
             raise ValueError("offset must be >= 0")
 
+        dialect = self._dialect
+        deps_gate = (
+            f"({dialect.cardinality('t.depends_on')} = 0 OR NOT EXISTS ("
+            f"SELECT 1 FROM conductor_tasks d "
+            f"WHERE {dialect.array_element_in('d.task_id', 't.depends_on')} "
+            f"AND d.status NOT IN ('completed', 'cancelled')))"
+        )
+        locking = dialect.for_update_skip_locked()
+
         if route:
-            query = """
+            query = f"""
                 SELECT * FROM conductor_tasks t
-                WHERE status = 'pending'
-                  AND (scheduled_for IS NULL OR scheduled_for <= NOW())
-                  AND (COALESCE(cardinality(t.depends_on), 0) = 0 OR NOT EXISTS (
-                      SELECT 1 FROM conductor_tasks d
-                      WHERE d.task_id = ANY(t.depends_on)
-                        AND d.status NOT IN ('completed', 'cancelled')
-                  ))
-                  AND route = $3
+                WHERE status IN ('pending', 'retrying')
+                  AND (scheduled_for IS NULL OR scheduled_for <= {dialect.now()})
+                  AND {deps_gate}
+                  AND route = {dialect.placeholder(1)}
                 ORDER BY priority DESC, created_at ASC
-                LIMIT $1 OFFSET $2
-                FOR UPDATE SKIP LOCKED
+                LIMIT {dialect.placeholder(2)} OFFSET {dialect.placeholder(3)}
+                {locking}
             """
-            rows = await self._pool.fetch(query, limit, offset, route)
+            rows = await self._pool.fetch(query, route, limit, offset)
         else:
-            query = """
+            query = f"""
                 SELECT * FROM conductor_tasks t
-                WHERE status = 'pending'
-                  AND (scheduled_for IS NULL OR scheduled_for <= NOW())
-                  AND (COALESCE(cardinality(t.depends_on), 0) = 0 OR NOT EXISTS (
-                      SELECT 1 FROM conductor_tasks d
-                      WHERE d.task_id = ANY(t.depends_on)
-                        AND d.status NOT IN ('completed', 'cancelled')
-                  ))
+                WHERE status IN ('pending', 'retrying')
+                  AND (scheduled_for IS NULL OR scheduled_for <= {dialect.now()})
+                  AND {deps_gate}
                 ORDER BY priority DESC, created_at ASC
-                LIMIT $1 OFFSET $2
-                FOR UPDATE SKIP LOCKED
+                LIMIT {dialect.placeholder(1)} OFFSET {dialect.placeholder(2)}
+                {locking}
             """
             rows = await self._pool.fetch(query, limit, offset)
 
-        return [_row_to_dict(r) for r in rows]
+        return [self._row_to_dict(r) for r in rows]
 
     async def select_tasks_by_status(
         self,
@@ -225,14 +355,15 @@ class QueryBuilder:
         if offset < 0:
             raise ValueError("offset must be >= 0")
 
-        query = """
+        dialect = self._dialect
+        query = f"""
             SELECT * FROM conductor_tasks
-            WHERE status = $1
+            WHERE status = {dialect.placeholder(1)}
             ORDER BY created_at DESC
-            LIMIT $2 OFFSET $3
+            LIMIT {dialect.placeholder(2)} OFFSET {dialect.placeholder(3)}
         """
         rows = await self._pool.fetch(query, status, limit, offset)
-        return [_row_to_dict(r) for r in rows]
+        return [self._row_to_dict(r) for r in rows]
 
     async def select_completed_tasks(
         self,
@@ -282,41 +413,14 @@ class QueryBuilder:
             ValueError: If ``limit``/``offset`` are invalid, or a filter
                 value is empty.
         """
-        if limit < 1:
-            raise ValueError("limit must be >= 1")
-        if offset < 0:
-            raise ValueError("offset must be >= 0")
-        if status is not None:
-            _validate_task_status(status)
-        if route is not None:
-            _validate_not_empty(route, "route")
-        if task_type is not None:
-            _validate_not_empty(task_type, "task_type")
-        if search is not None:
-            _validate_not_empty(search, "search")
+        conditions, params, idx = self._task_filters(
+            status=status,
+            route=route,
+            task_type=task_type,
+            search=search,
+        )
 
-        conditions: list[str] = []
-        params: list[Any] = []
-        idx = 1
-
-        if status is not None:
-            conditions.append(f"status = ${idx}")
-            params.append(status)
-            idx += 1
-        if route is not None:
-            conditions.append(f"route = ${idx}")
-            params.append(route)
-            idx += 1
-        if task_type is not None:
-            conditions.append(f"task_type = ${idx}")
-            params.append(task_type)
-            idx += 1
-        if search is not None:
-            conditions.append(f"(task_id ILIKE ${idx} OR task_type ILIKE ${idx + 1})")
-            params.append(f"%{search}%")
-            params.append(f"%{search}%")
-            idx += 2
-
+        dialect = self._dialect
         where_clause = ""
         if conditions:
             where_clause = "WHERE " + " AND ".join(conditions)
@@ -325,10 +429,10 @@ class QueryBuilder:
             SELECT * FROM conductor_tasks
             {where_clause}
             ORDER BY created_at DESC
-            LIMIT ${idx} OFFSET ${idx + 1}
+            LIMIT {dialect.placeholder(idx)} OFFSET {dialect.placeholder(idx + 1)}
         """
         rows = await self._pool.fetch(query, *params, limit, offset)
-        return [_row_to_dict(r) for r in rows]
+        return [self._row_to_dict(r) for r in rows]
 
     async def count_tasks(
         self,
@@ -354,36 +458,12 @@ class QueryBuilder:
         Raises:
             ValueError: If a filter value is empty.
         """
-        if status is not None:
-            _validate_task_status(status)
-        if route is not None:
-            _validate_not_empty(route, "route")
-        if task_type is not None:
-            _validate_not_empty(task_type, "task_type")
-        if search is not None:
-            _validate_not_empty(search, "search")
-
-        conditions: list[str] = []
-        params: list[Any] = []
-        idx = 1
-
-        if status is not None:
-            conditions.append(f"status = ${idx}")
-            params.append(status)
-            idx += 1
-        if route is not None:
-            conditions.append(f"route = ${idx}")
-            params.append(route)
-            idx += 1
-        if task_type is not None:
-            conditions.append(f"task_type = ${idx}")
-            params.append(task_type)
-            idx += 1
-        if search is not None:
-            conditions.append(f"(task_id ILIKE ${idx} OR task_type ILIKE ${idx + 1})")
-            params.append(f"%{search}%")
-            params.append(f"%{search}%")
-            idx += 2
+        conditions, params, _ = self._task_filters(
+            status=status,
+            route=route,
+            task_type=task_type,
+            search=search,
+        )
 
         where_clause = ""
         if conditions:
@@ -411,46 +491,47 @@ class QueryBuilder:
         _validate_not_empty(task_id, "task_id")
         _validate_task_status(new_status)
 
-        # Build SET clauses dynamically
-        set_parts = ["status = $2"]
-        params: list[Any] = [task_id, new_status]
-        idx = 3
+        dialect = self._dialect
+        set_parts = [f"status = {dialect.placeholder(1)}"]
+        params: list[Any] = [new_status]
+        idx = 2
 
         if worker_id is not None:
-            set_parts.append(f"worker_id = ${idx}")
+            set_parts.append(f"worker_id = {dialect.placeholder(idx)}")
             params.append(worker_id)
             idx += 1
         if result is not None:
-            set_parts.append(f"result = ${idx}::jsonb")
+            set_parts.append(f"result = {dialect.json_param(idx)}")
             params.append(_json(result))
             idx += 1
         if error_message is not None:
-            set_parts.append(f"error_message = ${idx}")
+            set_parts.append(f"error_message = {dialect.placeholder(idx)}")
             params.append(error_message)
             idx += 1
         if attempt is not None:
-            set_parts.append(f"attempt = ${idx}")
+            set_parts.append(f"attempt = {dialect.placeholder(idx)}")
             params.append(attempt)
             idx += 1
         if scheduled_for is not None:
-            set_parts.append(f"scheduled_for = ${idx}")
+            set_parts.append(f"scheduled_for = {dialect.placeholder(idx)}")
             params.append(scheduled_for)
             idx += 1
 
-        # Auto-set timestamps based on status
+        # Auto-set timestamps based on the target status.
         if new_status == "processing":
-            set_parts.append(f"started_at = ${idx}")
-            params.append(datetime.now(timezone.utc))
-            idx += 1
+            set_parts.append(f"started_at = {dialect.now()}")
         elif new_status in ("completed", "failed", "blocked"):
-            set_parts.append(f"completed_at = ${idx}")
-            params.append(datetime.now(timezone.utc))
-            idx += 1
+            set_parts.append(f"completed_at = {dialect.now()}")
 
-        query = f"UPDATE conductor_tasks SET {', '.join(set_parts)} " f"WHERE task_id = $1"
+        # The WHERE clause comes last so parameters stay in textual order.
+        query = (
+            f"UPDATE conductor_tasks SET {', '.join(set_parts)} "
+            f"WHERE task_id = {dialect.placeholder(idx)}"
+        )
+        params.append(task_id)
 
         result_tag = await self._pool.execute(query, *params)
-        return "UPDATE 1" in result_tag
+        return dialect.normalize_rowcount(result_tag, verb="UPDATE") == 1
 
     async def cancel_task(self, task_id: str) -> bool:
         """Cancel a pending or retrying task.
@@ -463,13 +544,15 @@ class QueryBuilder:
         """
         _validate_not_empty(task_id, "task_id")
 
+        dialect = self._dialect
         result_tag = await self._pool.execute(
             "UPDATE conductor_tasks "
-            "SET status = 'cancelled', completed_at = NOW() "
-            "WHERE task_id = $1 AND status IN ('pending', 'retrying')",
+            f"SET status = 'cancelled', completed_at = {dialect.now()} "
+            f"WHERE task_id = {dialect.placeholder(1)} "
+            "AND status IN ('pending', 'retrying')",
             task_id,
         )
-        return "UPDATE 1" in result_tag
+        return dialect.normalize_rowcount(result_tag, verb="UPDATE") == 1
 
     async def mark_dependents_blocked(
         self,
@@ -488,15 +571,46 @@ class QueryBuilder:
         """
         _validate_not_empty(task_id, "task_id")
 
-        rows = await self._pool.fetch(
-            "UPDATE conductor_tasks "
-            "SET status = 'blocked', error_message = $2, completed_at = NOW() "
-            "WHERE status = 'pending' AND depends_on @> ARRAY[$1] "
-            "RETURNING task_id",
-            task_id,
-            error_message,
-        )
-        return [str(r["task_id"]) for r in rows]
+        dialect = self._dialect
+        if dialect.supports_returning:
+            rows = await self._pool.fetch(
+                "UPDATE conductor_tasks "
+                f"SET status = 'blocked', error_message = {dialect.placeholder(1)}, "
+                f"completed_at = {dialect.now()} "
+                f"WHERE status = 'pending' AND {dialect.array_contains('depends_on', 2)} "
+                "RETURNING task_id",
+                error_message,
+                task_id,
+            )
+            return [str(r["task_id"]) for r in rows]
+
+        # MySQL has no RETURNING, so the update is split into a locking read
+        # and a write.  The write re-checks ``status = 'pending'`` so a
+        # dependent that completed in the meantime is not reported as blocked
+        # (callers propagate blocking transitively from the returned IDs).
+        async with self._pool.transaction() as conn:
+            pending = await conn.fetch(
+                "SELECT task_id FROM conductor_tasks "
+                f"WHERE status = 'pending' AND {dialect.array_contains('depends_on', 1)} "
+                "FOR UPDATE",
+                task_id,
+            )
+            blocked_ids = [str(row["task_id"]) for row in pending]
+            if not blocked_ids:
+                return []
+            # Placeholders must be numbered in textual order: the error message
+            # is the first parameter of the statement, the IDs follow.
+            error_placeholder = dialect.placeholder(1)
+            placeholders = dialect.placeholder_list(2, len(blocked_ids))
+            await conn.execute(
+                "UPDATE conductor_tasks "
+                f"SET status = 'blocked', error_message = {error_placeholder}, "
+                f"completed_at = {dialect.now()} "
+                f"WHERE status = 'pending' AND task_id IN ({placeholders})",
+                error_message,
+                *blocked_ids,
+            )
+            return blocked_ids
 
     async def clear_task_worker_id(self, task_id: str) -> bool:
         """Set ``worker_id`` to ``NULL`` for a task without changing status.
@@ -508,11 +622,13 @@ class QueryBuilder:
         """
         _validate_not_empty(task_id, "task_id")
 
+        dialect = self._dialect
         result = await self._pool.execute(
-            "UPDATE conductor_tasks SET worker_id = NULL WHERE task_id = $1",
+            "UPDATE conductor_tasks SET worker_id = NULL "
+            f"WHERE task_id = {dialect.placeholder(1)}",
             task_id,
         )
-        return "UPDATE 1" in result
+        return dialect.normalize_rowcount(result, verb="UPDATE") == 1
 
     async def clear_task_error_message(self, task_id: str) -> bool:
         """Set ``error_message`` to ``NULL`` for a task.
@@ -524,11 +640,13 @@ class QueryBuilder:
         """
         _validate_not_empty(task_id, "task_id")
 
+        dialect = self._dialect
         result = await self._pool.execute(
-            "UPDATE conductor_tasks SET error_message = NULL WHERE task_id = $1",
+            "UPDATE conductor_tasks SET error_message = NULL "
+            f"WHERE task_id = {dialect.placeholder(1)}",
             task_id,
         )
-        return "UPDATE 1" in result
+        return dialect.normalize_rowcount(result, verb="UPDATE") == 1
 
     # ==================================================================
     # Retry history queries
@@ -539,14 +657,14 @@ class QueryBuilder:
         _validate_not_empty(record.get("id"), "id")
         _validate_not_empty(record.get("task_id"), "task_id")
 
-        query = """
+        dialect = self._dialect
+        query = f"""
             INSERT INTO conductor_retries
                 (id, task_id, attempt, error_message, scheduled_at, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6)
-            RETURNING id
+            VALUES ({dialect.placeholder_list(1, 6)})
+            {"RETURNING id" if dialect.supports_returning else ""}
         """
-        row = await self._pool.fetchrow(
-            query,
+        values = (
             record["id"],
             record["task_id"],
             record["attempt"],
@@ -554,21 +672,28 @@ class QueryBuilder:
             record["scheduled_at"],
             record.get("created_at", datetime.now(timezone.utc)),
         )
-        if row is None:
-            raise TaskError(f"Failed to insert retry record '{record['id']}'")
-        return cast(str, row["id"])
+        if dialect.supports_returning:
+            row = await self._pool.fetchrow(query, *values)
+            if row is None:
+                raise TaskError(f"Failed to insert retry record '{record['id']}'")
+        else:
+            result = await self._pool.execute(query, *values)
+            if dialect.normalize_rowcount(result) == 0:
+                raise TaskError(f"Failed to insert retry record '{record['id']}'")
+        return cast(str, record["id"])
 
     async def select_retries_for_task(self, task_id: str) -> list[dict[str, Any]]:
         """Fetch all retry records for a given task, ordered by attempt."""
         _validate_not_empty(task_id, "task_id")
 
-        query = """
+        dialect = self._dialect
+        query = f"""
             SELECT * FROM conductor_retries
-            WHERE task_id = $1
+            WHERE task_id = {dialect.placeholder(1)}
             ORDER BY attempt ASC
         """
         rows = await self._pool.fetch(query, task_id)
-        return [_row_to_dict(r) for r in rows]
+        return [self._row_to_dict(r) for r in rows]
 
     # ==================================================================
     # Dead-letter queue queries
@@ -579,30 +704,40 @@ class QueryBuilder:
         _validate_not_empty(dlq.get("task_id"), "task_id")
         _validate_not_empty(dlq.get("task_type"), "task_type")
 
-        query = """
-            INSERT INTO conductor_dead_letter (
-                task_id, task_type, payload, error_message, attempts,
-                retry_policy, route, priority, depends_on, moved_at, discarded,
-                discard_reason, discarded_at
-            ) VALUES (
-                $1, $2, $3::jsonb, $4, $5,
-                $6::jsonb, $7, $8, $9, $10, $11,
-                $12, $13
+        dialect = self._dialect
+        values = ", ".join(
+            (
+                dialect.json_param(index)
+                if column in JSON_TASK_COLUMNS
+                else dialect.placeholder(index)
             )
-            ON CONFLICT (task_id) DO UPDATE SET
-                error_message = EXCLUDED.error_message,
-                attempts     = EXCLUDED.attempts,
-                route        = EXCLUDED.route,
-                priority     = EXCLUDED.priority,
-                depends_on   = EXCLUDED.depends_on,
-                moved_at     = EXCLUDED.moved_at,
-                discarded    = FALSE,
-                discard_reason = NULL,
-                discarded_at = NULL
-            RETURNING task_id
+            for index, column in enumerate(DEAD_LETTER_COLUMNS, start=1)
+        )
+        conflict = dialect.upsert(
+            ["task_id"],
+            [
+                ("error_message", "EXCLUDED.error_message"),
+                ("attempts", "EXCLUDED.attempts"),
+                ("route", "EXCLUDED.route"),
+                ("priority", "EXCLUDED.priority"),
+                ("depends_on", "EXCLUDED.depends_on"),
+                ("moved_at", "EXCLUDED.moved_at"),
+                ("discarded", "FALSE"),
+                ("discard_reason", "NULL"),
+                ("discarded_at", "NULL"),
+                ("traceparent", "EXCLUDED.traceparent"),
+            ],
+        )
+        query = f"""
+            INSERT INTO conductor_dead_letter (
+                {", ".join(DEAD_LETTER_COLUMNS)}
+            ) VALUES (
+                {values}
+            )
+            {conflict}
+            {"RETURNING task_id" if dialect.supports_returning else ""}
         """
-        row = await self._pool.fetchrow(
-            query,
+        dlq_values = (
             dlq["task_id"],
             dlq["task_type"],
             _json(dlq.get("payload", {})),
@@ -616,10 +751,19 @@ class QueryBuilder:
             dlq.get("discarded", False),
             dlq.get("discard_reason"),
             dlq.get("discarded_at"),
+            dlq.get("traceparent"),
         )
-        if row is None:
-            raise TaskError(f"Failed to insert DLQ task '{dlq['task_id']}'")
-        return cast(str, row["task_id"])
+
+        if dialect.supports_returning:
+            row = await self._pool.fetchrow(query, *dlq_values)
+            if row is None:
+                raise TaskError(f"Failed to insert DLQ task '{dlq['task_id']}'")
+        else:
+            # The upsert is idempotent, so a zero affected-row count (MySQL,
+            # identical row already present) is a success, not an error.
+            await self._pool.execute(query, *dlq_values)
+
+        return cast(str, dlq["task_id"])
 
     async def select_dlq_tasks(
         self,
@@ -633,31 +777,25 @@ class QueryBuilder:
         if offset < 0:
             raise ValueError("offset must be >= 0")
 
-        if include_discarded:
-            query = """
-                SELECT * FROM conductor_dead_letter
-                ORDER BY moved_at DESC
-                LIMIT $1 OFFSET $2
-            """
-            rows = await self._pool.fetch(query, limit, offset)
-        else:
-            query = """
-                SELECT * FROM conductor_dead_letter
-                WHERE discarded = FALSE
-                ORDER BY moved_at DESC
-                LIMIT $1 OFFSET $2
-            """
-            rows = await self._pool.fetch(query, limit, offset)
-
-        return [_row_to_dict(r) for r in rows]
+        dialect = self._dialect
+        where_clause = "" if include_discarded else "WHERE discarded = FALSE"
+        query = f"""
+            SELECT * FROM conductor_dead_letter
+            {where_clause}
+            ORDER BY moved_at DESC
+            LIMIT {dialect.placeholder(1)} OFFSET {dialect.placeholder(2)}
+        """
+        rows = await self._pool.fetch(query, limit, offset)
+        return [self._row_to_dict(r) for r in rows]
 
     async def select_dlq_task(self, task_id: str) -> Optional[dict[str, Any]]:
         """Fetch a single DLQ entry by task ID."""
         _validate_not_empty(task_id, "task_id")
 
-        query = "SELECT * FROM conductor_dead_letter WHERE task_id = $1"
+        dialect = self._dialect
+        query = "SELECT * FROM conductor_dead_letter " f"WHERE task_id = {dialect.placeholder(1)}"
         row = await self._pool.fetchrow(query, task_id)
-        return _row_to_dict(row) if row else None
+        return self._row_to_dict(row) if row else None
 
     async def delete_dlq_task(self, task_id: str) -> bool:
         """Remove a task from the dead-letter queue entirely.
@@ -666,11 +804,12 @@ class QueryBuilder:
         """
         _validate_not_empty(task_id, "task_id")
 
+        dialect = self._dialect
         result = await self._pool.execute(
-            "DELETE FROM conductor_dead_letter WHERE task_id = $1",
+            "DELETE FROM conductor_dead_letter " f"WHERE task_id = {dialect.placeholder(1)}",
             task_id,
         )
-        return "DELETE 1" in result
+        return dialect.normalize_rowcount(result, verb="DELETE") == 1
 
     async def discard_dlq_task(
         self,
@@ -683,18 +822,16 @@ class QueryBuilder:
         """
         _validate_not_empty(task_id, "task_id")
 
+        dialect = self._dialect
         result = await self._pool.execute(
-            """
-            UPDATE conductor_dead_letter
-            SET discarded = TRUE,
-                discard_reason = $2,
-                discarded_at = NOW()
-            WHERE task_id = $1
-            """,
-            task_id,
+            "UPDATE conductor_dead_letter "
+            f"SET discarded = TRUE, discard_reason = {dialect.placeholder(1)}, "
+            f"discarded_at = {dialect.now()} "
+            f"WHERE task_id = {dialect.placeholder(2)}",
             reason,
+            task_id,
         )
-        return "UPDATE 1" in result
+        return dialect.normalize_rowcount(result, verb="UPDATE") == 1
 
     # ==================================================================
     # Recurring task queries
@@ -722,20 +859,27 @@ class QueryBuilder:
         _validate_not_empty(recurring.get("task_type"), "task_type")
         _validate_cron_expression(recurring.get("cron_expression"))
 
-        query = """
-            INSERT INTO conductor_recurring_tasks (
-                id, task_type, payload, cron_expression, route, priority,
-                retry_policy, enabled, next_run_at, last_run_at, created_at
-            ) VALUES (
-                $1, $2, $3::jsonb, $4, $5, $6,
-                $7::jsonb, $8, $9, $10, $11
+        dialect = self._dialect
+        values = ", ".join(
+            (
+                dialect.json_param(index)
+                if column in JSON_TASK_COLUMNS
+                else dialect.placeholder(index)
             )
-            ON CONFLICT (id) DO NOTHING
-            RETURNING id
+            for index, column in enumerate(RECURRING_COLUMNS, start=1)
+        )
+        conflict = dialect.insert_ignore(["id"])
+        query = f"""
+            INSERT INTO conductor_recurring_tasks (
+                {", ".join(RECURRING_COLUMNS)}
+            ) VALUES (
+                {values}
+            )
+            {conflict}
+            {"RETURNING id" if dialect.supports_returning else ""}
         """
         target = conn if conn is not None else self._pool
-        row = await target.fetchrow(
-            query,
+        recurring_values = (
             recurring["id"],
             recurring["task_type"],
             _json(recurring.get("payload", {})),
@@ -748,10 +892,17 @@ class QueryBuilder:
             recurring.get("last_run_at"),
             recurring.get("created_at", datetime.now(timezone.utc)),
         )
-        if row is None:
+        if dialect.supports_returning:
+            row = await target.fetchrow(query, *recurring_values)
+            inserted = row is not None
+        else:
+            # ``ON DUPLICATE KEY UPDATE id = id`` reports 0 affected rows when
+            # the row already exists (MySQL has no ``ON CONFLICT DO NOTHING``).
+            result = await target.execute(query, *recurring_values)
+            inserted = dialect.normalize_rowcount(result) != 0
+        if not inserted:
             raise TaskError(f"Recurring task '{recurring['id']}' already exists")
-
-        return cast(str, row["id"])
+        return cast(str, recurring["id"])
 
     async def select_recurring_task(
         self,
@@ -762,10 +913,11 @@ class QueryBuilder:
         """Fetch a single recurring definition by ID."""
         _validate_not_empty(recurring_id, "recurring_id")
 
-        query = "SELECT * FROM conductor_recurring_tasks WHERE id = $1"
+        dialect = self._dialect
+        query = "SELECT * FROM conductor_recurring_tasks " f"WHERE id = {dialect.placeholder(1)}"
         target = conn if conn is not None else self._pool
         row = await target.fetchrow(query, recurring_id)
-        return _row_to_dict(row) if row else None
+        return self._row_to_dict(row) if row else None
 
     async def select_recurring_tasks(
         self,
@@ -780,14 +932,15 @@ class QueryBuilder:
         if offset < 0:
             raise ValueError("offset must be >= 0")
 
-        query = """
+        dialect = self._dialect
+        query = f"""
             SELECT * FROM conductor_recurring_tasks
             ORDER BY created_at DESC
-            LIMIT $1 OFFSET $2
+            LIMIT {dialect.placeholder(1)} OFFSET {dialect.placeholder(2)}
         """
         target = conn if conn is not None else self._pool
         rows = await target.fetch(query, limit, offset)
-        return [_row_to_dict(r) for r in rows]
+        return [self._row_to_dict(r) for r in rows]
 
     async def select_due_recurring_tasks(
         self,
@@ -805,16 +958,17 @@ class QueryBuilder:
         if limit < 1:
             raise ValueError("limit must be >= 1")
 
-        query = """
+        dialect = self._dialect
+        query = f"""
             SELECT * FROM conductor_recurring_tasks
-            WHERE enabled = TRUE AND next_run_at <= $1
+            WHERE enabled = TRUE AND next_run_at <= {dialect.placeholder(1)}
             ORDER BY next_run_at ASC
-            LIMIT $2
-            FOR UPDATE SKIP LOCKED
+            LIMIT {dialect.placeholder(2)}
+            {dialect.for_update_skip_locked()}
         """
         target = conn if conn is not None else self._pool
         rows = await target.fetch(query, now, limit)
-        return [_row_to_dict(r) for r in rows]
+        return [self._row_to_dict(r) for r in rows]
 
     async def update_recurring_run(
         self,
@@ -830,14 +984,16 @@ class QueryBuilder:
         """
         _validate_not_empty(recurring_id, "recurring_id")
 
-        query = """
-            UPDATE conductor_recurring_tasks
-            SET last_run_at = $2, next_run_at = $3
-            WHERE id = $1
-        """
+        dialect = self._dialect
+        query = (
+            "UPDATE conductor_recurring_tasks "
+            f"SET last_run_at = {dialect.placeholder(1)}, "
+            f"next_run_at = {dialect.placeholder(2)} "
+            f"WHERE id = {dialect.placeholder(3)}"
+        )
         target = conn if conn is not None else self._pool
-        result = await target.execute(query, recurring_id, last_run_at, next_run_at)
-        return "UPDATE 1" in result
+        result = await target.execute(query, last_run_at, next_run_at, recurring_id)
+        return dialect.normalize_rowcount(result, verb="UPDATE") == 1
 
     async def set_recurring_enabled(
         self,
@@ -852,10 +1008,15 @@ class QueryBuilder:
         """
         _validate_not_empty(recurring_id, "recurring_id")
 
-        query = "UPDATE conductor_recurring_tasks SET enabled = $2 WHERE id = $1"
+        dialect = self._dialect
+        query = (
+            "UPDATE conductor_recurring_tasks "
+            f"SET enabled = {dialect.placeholder(1)} "
+            f"WHERE id = {dialect.placeholder(2)}"
+        )
         target = conn if conn is not None else self._pool
-        result = await target.execute(query, recurring_id, enabled)
-        return "UPDATE 1" in result
+        result = await target.execute(query, enabled, recurring_id)
+        return dialect.normalize_rowcount(result, verb="UPDATE") == 1
 
     async def delete_recurring_task(
         self,
@@ -869,10 +1030,11 @@ class QueryBuilder:
         """
         _validate_not_empty(recurring_id, "recurring_id")
 
-        query = "DELETE FROM conductor_recurring_tasks WHERE id = $1"
+        dialect = self._dialect
+        query = "DELETE FROM conductor_recurring_tasks " f"WHERE id = {dialect.placeholder(1)}"
         target = conn if conn is not None else self._pool
         result = await target.execute(query, recurring_id)
-        return "DELETE 1" in result
+        return dialect.normalize_rowcount(result, verb="DELETE") == 1
 
     # ==================================================================
     # Worker queries
@@ -882,27 +1044,30 @@ class QueryBuilder:
         """Insert or update a worker record.  Returns the ``worker_id``."""
         _validate_not_empty(worker.get("worker_id"), "worker_id")
 
-        query = """
+        dialect = self._dialect
+        conflict = dialect.upsert(
+            ["worker_id"],
+            [
+                ("status", "EXCLUDED.status"),
+                ("current_task_id", "EXCLUDED.current_task_id"),
+                ("uptime_seconds", "EXCLUDED.uptime_seconds"),
+                ("tasks_processed_total", "EXCLUDED.tasks_processed_total"),
+                ("tasks_failed_total", "EXCLUDED.tasks_failed_total"),
+                ("last_heartbeat", "EXCLUDED.last_heartbeat"),
+            ],
+        )
+        query = f"""
             INSERT INTO conductor_workers (
                 worker_id, status, current_task_id, hostname, pid,
                 uptime_seconds, tasks_processed_total, tasks_failed_total,
                 last_heartbeat, started_at
             ) VALUES (
-                $1, $2, $3, $4, $5,
-                $6, $7, $8,
-                $9, $10
+                {dialect.placeholder_list(1, 10)}
             )
-            ON CONFLICT (worker_id) DO UPDATE SET
-                status               = EXCLUDED.status,
-                current_task_id      = EXCLUDED.current_task_id,
-                uptime_seconds       = EXCLUDED.uptime_seconds,
-                tasks_processed_total = EXCLUDED.tasks_processed_total,
-                tasks_failed_total   = EXCLUDED.tasks_failed_total,
-                last_heartbeat       = EXCLUDED.last_heartbeat
-            RETURNING worker_id
+            {conflict}
+            {"RETURNING worker_id" if dialect.supports_returning else ""}
         """
-        row = await self._pool.fetchrow(
-            query,
+        values = (
             worker["worker_id"],
             worker.get("status", "idle"),
             worker.get("current_task_id"),
@@ -914,30 +1079,37 @@ class QueryBuilder:
             worker.get("last_heartbeat", datetime.now(timezone.utc)),
             worker.get("started_at", datetime.now(timezone.utc)),
         )
-        if row is None:
-            raise TaskError(f"Failed to upsert worker '{worker['worker_id']}'")
-        return cast(str, row["worker_id"])
+        if dialect.supports_returning:
+            row = await self._pool.fetchrow(query, *values)
+            if row is None:
+                raise TaskError(f"Failed to upsert worker '{worker['worker_id']}'")
+        else:
+            # The upsert is idempotent, so no affected-row count check is made.
+            await self._pool.execute(query, *values)
+        return cast(str, worker["worker_id"])
 
     async def select_worker(self, worker_id: str) -> Optional[dict[str, Any]]:
         """Fetch a single worker by ID."""
         _validate_not_empty(worker_id, "worker_id")
 
-        query = "SELECT * FROM conductor_workers WHERE worker_id = $1"
+        dialect = self._dialect
+        query = f"SELECT * FROM conductor_workers WHERE worker_id = {dialect.placeholder(1)}"
         row = await self._pool.fetchrow(query, worker_id)
-        return _row_to_dict(row) if row else None
+        return self._row_to_dict(row) if row else None
 
     async def select_active_workers(self, heartbeat_timeout: float = 30.0) -> list[dict[str, Any]]:
         """Fetch workers with heartbeat within *heartbeat_timeout* seconds."""
         if heartbeat_timeout <= 0:
             raise ValueError("heartbeat_timeout must be > 0")
 
-        query = """
+        dialect = self._dialect
+        query = f"""
             SELECT * FROM conductor_workers
-            WHERE last_heartbeat >= NOW() - MAKE_INTERVAL(secs => $1)
+            WHERE {dialect.interval_ago("last_heartbeat", 1)}
             ORDER BY last_heartbeat DESC
         """
         rows = await self._pool.fetch(query, heartbeat_timeout)
-        return [_row_to_dict(r) for r in rows]
+        return [self._row_to_dict(r) for r in rows]
 
     async def select_all_workers(
         self,
@@ -964,13 +1136,14 @@ class QueryBuilder:
         if offset < 0:
             raise ValueError("offset must be >= 0")
 
-        query = """
+        dialect = self._dialect
+        query = f"""
             SELECT * FROM conductor_workers
-            ORDER BY last_heartbeat DESC NULLS LAST
-            LIMIT $1 OFFSET $2
+            ORDER BY {dialect.nulls_last("last_heartbeat DESC")}
+            LIMIT {dialect.placeholder(1)} OFFSET {dialect.placeholder(2)}
         """
         rows = await self._pool.fetch(query, limit, offset)
-        return [_row_to_dict(r) for r in rows]
+        return [self._row_to_dict(r) for r in rows]
 
     async def update_worker_heartbeat(
         self,
@@ -991,42 +1164,40 @@ class QueryBuilder:
         if status is not None:
             _validate_worker_status(status)
 
-        set_parts = ["last_heartbeat = NOW()"]
+        dialect = self._dialect
+        set_parts = [f"last_heartbeat = {dialect.now()}"]
         params: list[Any] = []
-        idx = 2
+        idx = 1
 
         if status is not None:
-            set_parts.append(f"status = ${idx}")
+            set_parts.append(f"status = {dialect.placeholder(idx)}")
             params.append(status)
             idx += 1
         if current_task_id is not None:
-            set_parts.append(f"current_task_id = ${idx}")
+            set_parts.append(f"current_task_id = {dialect.placeholder(idx)}")
             params.append(current_task_id)
             idx += 1
         if uptime_seconds is not None:
-            set_parts.append(f"uptime_seconds = ${idx}")
+            set_parts.append(f"uptime_seconds = {dialect.placeholder(idx)}")
             params.append(uptime_seconds)
             idx += 1
         if tasks_processed_total is not None:
-            set_parts.append(f"tasks_processed_total = ${idx}")
+            set_parts.append(f"tasks_processed_total = {dialect.placeholder(idx)}")
             params.append(tasks_processed_total)
             idx += 1
         if tasks_failed_total is not None:
-            set_parts.append(f"tasks_failed_total = ${idx}")
+            set_parts.append(f"tasks_failed_total = {dialect.placeholder(idx)}")
             params.append(tasks_failed_total)
             idx += 1
 
-        if not params:
-            # Only updating the heartbeat timestamp
-            result = await self._pool.execute(
-                "UPDATE conductor_workers" " SET last_heartbeat = NOW() WHERE worker_id = $1",
-                worker_id,
-            )
-            return "UPDATE 1" in result
+        query = (
+            f"UPDATE conductor_workers SET {', '.join(set_parts)} "
+            f"WHERE worker_id = {dialect.placeholder(idx)}"
+        )
+        params.append(worker_id)
 
-        query = f"UPDATE conductor_workers SET {', '.join(set_parts)} " f"WHERE worker_id = $1"
-        result = await self._pool.execute(query, worker_id, *params)
-        return "UPDATE 1" in result
+        result = await self._pool.execute(query, *params)
+        return dialect.normalize_rowcount(result, verb="UPDATE") == 1
 
     # ==================================================================
     # Maintenance queries
@@ -1036,8 +1207,9 @@ class QueryBuilder:
         """Count tasks with the given status."""
         _validate_task_status(status)
 
+        dialect = self._dialect
         row = await self._pool.fetchval(
-            "SELECT COUNT(*) FROM conductor_tasks WHERE status = $1",
+            "SELECT COUNT(*) FROM conductor_tasks " f"WHERE status = {dialect.placeholder(1)}",
             status,
         )
         return row or 0
@@ -1048,7 +1220,7 @@ class QueryBuilder:
             row = await self._pool.fetchval("SELECT COUNT(*) FROM conductor_dead_letter")
         else:
             row = await self._pool.fetchval(
-                "SELECT COUNT(*) FROM conductor_dead_letter" " WHERE discarded = FALSE",
+                "SELECT COUNT(*) FROM conductor_dead_letter WHERE discarded = FALSE",
             )
         return row or 0
 
@@ -1057,9 +1229,10 @@ class QueryBuilder:
         if heartbeat_timeout <= 0:
             raise ValueError("heartbeat_timeout must be > 0")
 
+        dialect = self._dialect
         row = await self._pool.fetchval(
             "SELECT COUNT(*) FROM conductor_workers "
-            "WHERE last_heartbeat >= NOW() - MAKE_INTERVAL(secs => $1)",
+            f"WHERE {dialect.interval_ago('last_heartbeat', 1)}",
             heartbeat_timeout,
         )
         return row or 0
@@ -1069,13 +1242,78 @@ class QueryBuilder:
 
         Returns the number of deleted rows.
         """
+        dialect = self._dialect
         result = await self._pool.execute(
-            "DELETE FROM conductor_tasks" " WHERE status = 'completed' AND completed_at < $1",
+            "DELETE FROM conductor_tasks "
+            f"WHERE status = 'completed' AND completed_at < {dialect.placeholder(1)}",
             older_than,
         )
-        # Extract the integer from the "DELETE N" tag
-        parts = result.split()
-        return int(parts[1]) if len(parts) == 2 else 0
+        return dialect.normalize_rowcount(result, verb="DELETE")
+
+    # ==================================================================
+    # Internal helpers
+    # ==================================================================
+
+    def _task_filters(
+        self,
+        *,
+        status: Optional[str],
+        route: Optional[str],
+        task_type: Optional[str],
+        search: Optional[str],
+    ) -> tuple[list[str], list[Any], int]:
+        """Build the shared ``WHERE`` fragments for the dashboard task queries.
+
+        Returns:
+            A ``(conditions, params, next_index)`` tuple, where the conditions
+            and parameters are in textual order.
+        """
+        if status is not None:
+            _validate_task_status(status)
+        if route is not None:
+            _validate_not_empty(route, "route")
+        if task_type is not None:
+            _validate_not_empty(task_type, "task_type")
+        if search is not None:
+            _validate_not_empty(search, "search")
+
+        dialect = self._dialect
+        conditions: list[str] = []
+        params: list[Any] = []
+        idx = 1
+
+        if status is not None:
+            conditions.append(f"status = {dialect.placeholder(idx)}")
+            params.append(status)
+            idx += 1
+        if route is not None:
+            conditions.append(f"route = {dialect.placeholder(idx)}")
+            params.append(route)
+            idx += 1
+        if task_type is not None:
+            conditions.append(f"task_type = {dialect.placeholder(idx)}")
+            params.append(task_type)
+            idx += 1
+        if search is not None:
+            conditions.append(
+                f"({dialect.ilike('task_id', idx)}" f" OR {dialect.ilike('task_type', idx + 1)})"
+            )
+            params.append(f"%{search}%")
+            params.append(f"%{search}%")
+            idx += 2
+
+        return conditions, params, idx
+
+    def _row_to_dict(self, row: Any) -> dict[str, Any]:
+        """Normalise a backend row into a plain, dialect-independent dict.
+
+        JSON columns are decoded (asyncpg can return JSONB as text on newer
+        Pythons) and timestamp columns are turned into aware UTC datetimes
+        (SQLite stores them as text).
+        """
+        if row is None:
+            return {}
+        return self._dialect.normalize_row(row)
 
 
 # ---------------------------------------------------------------------------
@@ -1088,24 +1326,3 @@ def _json(value: Any) -> Optional[str]:
     if value is None:
         return None
     return json.dumps(value, default=str, ensure_ascii=False)
-
-
-def _row_to_dict(row: Any) -> dict[str, Any]:
-    """Convert an asyncpg ``Record`` to a plain dict.
-
-    asyncpg ``Record`` objects are dict-like but not serialisable via
-    ``json.dumps`` out-of-the-box.  This normalises them.
-
-    On Python 3.14+, asyncpg 0.31 returns ``JSON`` / ``JSONB`` columns
-    as plain strings rather than parsed ``dict`` objects.  We
-    auto-deserialise any string value that looks like JSON so that
-    callers always receive ``dict`` for JSONB fields.
-    """
-    result: dict[str, Any] = dict(row) if row is not None else {}
-    for key, val in result.items():
-        if isinstance(val, str) and len(val) > 0 and val[0] in ("{", "["):
-            try:
-                result[key] = json.loads(val)
-            except (json.JSONDecodeError, TypeError):
-                pass  # keep original string
-    return result

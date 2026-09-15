@@ -26,6 +26,7 @@ from conductor.db.connection import DatabasePool
 from conductor.db.queries import QueryBuilder
 from conductor.db.schema import SchemaManager
 from conductor.exceptions import TaskError
+from conductor.observability import tracing
 from conductor.observability.metrics import inc_tasks_submitted
 
 logger = logging.getLogger("conductor.core.queue")
@@ -85,7 +86,7 @@ def _validate_depends_on(depends_on: Optional[list[str]]) -> None:
 class TaskQueue:
     """High-level interface for submitting and querying tasks.
 
-    Manages a PostgreSQL connection pool internally and provides
+    Manages a database connection pool internally and provides
     async context manager support.  All public methods are async.
 
     Typical usage::
@@ -94,6 +95,9 @@ class TaskQueue:
             task_id = await queue.submit("email", {"to": "user@example.com"})
             task = await queue.get_task(task_id)
             pending = await queue.list_pending_tasks()
+
+    The backend is selected from the DSN scheme – ``postgresql://`` (default),
+    ``sqlite:///conductor.db`` (embedded, single process) or ``mysql://``.
     """
 
     def __init__(
@@ -107,6 +111,7 @@ class TaskQueue:
         pool_max_size: int = 10,
         pool_timeout: float = 30.0,
         command_timeout: float = 60.0,
+        busy_timeout: float = 5.0,
     ) -> None:
         self._database_url = database_url
         # Reserved for Sprint 3 (Worker) — timeout for individual task execution
@@ -123,6 +128,7 @@ class TaskQueue:
             max_size=pool_max_size,
             timeout=pool_timeout,
             command_timeout=command_timeout,
+            busy_timeout=busy_timeout,
         )
         self._queries: Optional[QueryBuilder] = None
         self._connected = False
@@ -221,23 +227,36 @@ class TaskQueue:
         if depends_on and tid in depends_on:
             raise ValueError("a task cannot depend on itself")
 
-        task = Task(
-            task_id=tid,
-            task_type=task_type,
-            payload=payload,
-            status=TaskStatus.PENDING,
-            priority=priority,
-            route=route,
-            depends_on=depends_on or [],
-            retry_policy=rp,
-            attempt=0,
-            max_retries=rp.max_retries,
-            scheduled_for=scheduled_for,
-            created_at=utc_now(),
-        )
+        with tracing.span(
+            tracing.SPAN_SUBMIT,
+            attributes={
+                tracing.ATTR_TASK_TYPE: task_type,
+                tracing.ATTR_TASK_ROUTE: route,
+                tracing.ATTR_TASK_PRIORITY: priority,
+            },
+        ) as active:
+            task = Task(
+                task_id=tid,
+                task_type=task_type,
+                payload=payload,
+                status=TaskStatus.PENDING,
+                priority=priority,
+                route=route,
+                depends_on=depends_on or [],
+                retry_policy=rp,
+                attempt=0,
+                max_retries=rp.max_retries,
+                scheduled_for=scheduled_for,
+                created_at=utc_now(),
+                # Persist the producing trace so a worker in another process
+                # can continue it (schema v6).
+                traceparent=tracing.current_traceparent(),
+            )
 
-        db_dict = _task_to_db_dict(task)
-        inserted_id = await self._query.insert_task(db_dict)
+            db_dict = _task_to_db_dict(task)
+            inserted_id = await self._query.insert_task(db_dict)
+            tracing.set_task_attributes(active, task_id=inserted_id)
+
         inc_tasks_submitted(task_type)
         logger.info(
             "Task submitted: %s (%s)",
@@ -261,7 +280,7 @@ class TaskQueue:
     ) -> list[str]:
         """Submit multiple tasks in a single database transaction.
 
-        All inserts are wrapped in a PostgreSQL transaction for atomicity
+        All inserts are wrapped in a database transaction for atomicity
         — if any insert fails, the entire batch is rolled back.
 
         Each tuple is ``(task_type, payload)``.
@@ -315,21 +334,37 @@ class TaskQueue:
 
         # Insert all in a single transaction for atomicity
         task_ids: list[str] = []
-        async with self._pool.acquire() as conn:
-            async with conn.transaction():
-                for db_dict in task_dicts:
-                    inserted_id = await self._query.insert_task(db_dict)
-                    task_ids.append(inserted_id)
-                    inc_tasks_submitted(db_dict["task_type"])
-                    logger.info(
-                        "Task submitted: %s (%s)",
-                        inserted_id,
-                        db_dict["task_type"],
-                        extra={
-                            "task_id": inserted_id,
-                            "task_type": db_dict["task_type"],
-                        },
-                    )
+        # One span for the whole batch: every task shares its trace, so the
+        # batch is a single unit of work in the trace view.
+        with tracing.span(
+            tracing.SPAN_SUBMIT_MANY,
+            attributes={
+                tracing.ATTR_TASK_ROUTE: route,
+                tracing.ATTR_TASK_PRIORITY: priority,
+            },
+        ) as active:
+            active.set_attribute("task.count", len(task_dicts))
+            batch_traceparent = tracing.current_traceparent()
+            async with self._pool.acquire() as conn:
+                async with conn.transaction():
+                    for db_dict in task_dicts:
+                        # Insert on the acquired connection so the whole batch is
+                        # one transaction (the docstring promised atomicity, but
+                        # the inserts previously went through the pool one by
+                        # one).
+                        db_dict["traceparent"] = batch_traceparent
+                        inserted_id = await self._query.insert_task(db_dict, conn=conn)
+                        task_ids.append(inserted_id)
+                        inc_tasks_submitted(db_dict["task_type"])
+                        logger.info(
+                            "Task submitted: %s (%s)",
+                            inserted_id,
+                            db_dict["task_type"],
+                            extra={
+                                "task_id": inserted_id,
+                                "task_type": db_dict["task_type"],
+                            },
+                        )
 
         return task_ids
 
@@ -455,13 +490,14 @@ class TaskQueue:
                 (``processing``, ``completed``, ``failed`` or ``cancelled``).
         """
         self._require_connected()
-        if not await self._query.cancel_task(task_id):
-            task = await self._query.select_task(task_id)
-            if task is None:
-                raise TaskError(f"Task '{task_id}' not found.")
-            raise TaskError(
-                f"Task '{task_id}' cannot be cancelled from status " f"'{task['status']}'."
-            )
+        with tracing.span(tracing.SPAN_CANCEL, attributes={tracing.ATTR_TASK_ID: task_id}):
+            if not await self._query.cancel_task(task_id):
+                task = await self._query.select_task(task_id)
+                if task is None:
+                    raise TaskError(f"Task '{task_id}' not found.")
+                raise TaskError(
+                    f"Task '{task_id}' cannot be cancelled from status " f"'{task['status']}'."
+                )
 
     # ------------------------------------------------------------------
     # Dead-letter queue queries
@@ -528,39 +564,54 @@ class TaskQueue:
             raise TaskError(f"Task '{task_id}' not found in the dead-letter queue.")
 
         now = utc_now()
-        await self._query.delete_dlq_task(task_id)
+        # A retry is a new execution of an old one, so the span *links* to the
+        # original trace instead of nesting inside a finished span.
+        link = tracing.span_link(dlq_row.get("traceparent"))
+        with tracing.span(
+            tracing.SPAN_DLQ_RETRY,
+            attributes={tracing.ATTR_TASK_ID: task_id},
+            links=[link] if link is not None else None,
+        ):
+            await self._query.delete_dlq_task(task_id)
 
-        existing_task = await self._query.select_task(task_id)
-        if existing_task is not None:
-            await self._query.update_task_status(
-                task_id,
-                "pending",
-                worker_id=None,
-                error_message=None,
-                attempt=0,
-                scheduled_for=now,
-            )
-        else:
-            rp = RetryPolicy.from_dict(dlq_row.get("retry_policy", {}))
-            task_dict: dict[str, Any] = {
-                "task_id": task_id,
-                "task_type": dlq_row["task_type"],
-                "payload": dlq_row.get("payload", {}),
-                "status": "pending",
-                "priority": 0,
-                "route": "default",
-                "attempt": 0,
-                "max_retries": rp.max_retries,
-                "retry_policy": rp.to_dict(),
-                "scheduled_for": now,
-                "worker_id": None,
-                "result": None,
-                "error_message": None,
-                "created_at": now,
-                "started_at": None,
-                "completed_at": None,
-            }
-            await self._query.insert_task(task_dict)
+            existing_task = await self._query.select_task(task_id)
+            if existing_task is not None:
+                await self._query.update_task_status(
+                    task_id,
+                    "pending",
+                    worker_id=None,
+                    error_message=None,
+                    attempt=0,
+                    scheduled_for=now,
+                )
+                # ``update_task_status`` skips fields passed as ``None``, so the
+                # failure metadata must be cleared explicitly (this mirrors
+                # ``DeadLetterQueue.retry_task``).
+                await self._query.clear_task_worker_id(task_id)
+                await self._query.clear_task_error_message(task_id)
+            else:
+                rp = RetryPolicy.from_dict(dlq_row.get("retry_policy", {}))
+                task_dict: dict[str, Any] = {
+                    "task_id": task_id,
+                    "task_type": dlq_row["task_type"],
+                    "payload": dlq_row.get("payload", {}),
+                    "status": "pending",
+                    "priority": dlq_row.get("priority", 0),
+                    "route": dlq_row.get("route", "default"),
+                    "depends_on": dlq_row.get("depends_on") or [],
+                    "attempt": 0,
+                    "max_retries": rp.max_retries,
+                    "retry_policy": rp.to_dict(),
+                    "scheduled_for": now,
+                    "worker_id": None,
+                    "result": None,
+                    "error_message": None,
+                    "created_at": now,
+                    "started_at": None,
+                    "completed_at": None,
+                    "traceparent": dlq_row.get("traceparent"),
+                }
+                await self._query.insert_task(task_dict)
 
         logger.info(
             "Task %s retried from DLQ.",
@@ -589,7 +640,11 @@ class TaskQueue:
         if dlq_row is None:
             raise TaskError(f"Task '{task_id}' not found in the dead-letter queue.")
 
-        await self._query.discard_dlq_task(task_id, reason=reason)
+        with tracing.span(
+            tracing.SPAN_DLQ_DISCARD,
+            attributes={tracing.ATTR_TASK_ID: task_id},
+        ):
+            await self._query.discard_dlq_task(task_id, reason=reason)
         logger.info(
             "Task %s discarded from DLQ (reason: %s).",
             task_id,
@@ -805,10 +860,12 @@ class TaskQueue:
     # Public helpers for test infrastructure
     # ------------------------------------------------------------------
 
-    async def execute_raw(self, query: str, *args: Any) -> str:
+    async def execute_raw(self, query: str, *args: Any) -> Any:
         """Execute a raw SQL statement.
 
         Primarily intended for test cleanup (``DELETE``, ``TRUNCATE``).
+        Returns whatever the backend reports: a command tag on
+        PostgreSQL/SQLite, an affected-row count on MySQL.
         """
         if not self._connected:
             raise TaskError("TaskQueue is not connected.")
@@ -861,6 +918,7 @@ def _task_to_db_dict(task: Task) -> dict[str, Any]:
         "created_at": task.created_at,
         "started_at": task.started_at,
         "completed_at": task.completed_at,
+        "traceparent": task.traceparent,
     }
 
 

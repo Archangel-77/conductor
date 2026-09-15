@@ -35,7 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the command-line argument parser."""
     parser = argparse.ArgumentParser(
         prog="conductor",
-        description="Lightweight async task queue for Python (PostgreSQL-backed).",
+        description="Lightweight async task queue for Python (PostgreSQL/SQLite backed).",
     )
     parser.add_argument(
         "--version",

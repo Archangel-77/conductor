@@ -99,24 +99,24 @@ class TestHealthCheck:
     async def test_degraded_status(self, health_checker: Any) -> None:
         """With DLQ size above threshold, status should be degraded."""
         from conductor.core.models import generate_task_id, utc_now
+        from conductor.db.queries import QueryBuilder
 
-        pool = health_checker._pool
+        queries = QueryBuilder(health_checker._pool)
         threshold = health_checker._dlq_size_threshold  # 5
 
-        # Insert threshold + 1 tasks into the DLQ
+        # Insert threshold + 1 tasks into the DLQ (dialect-aware, so this runs
+        # on every backend rather than only on PostgreSQL).
         for i in range(threshold + 1):
-            task_id = generate_task_id()
-            await pool.execute(
-                """
-                INSERT INTO conductor_dead_letter
-                    (task_id, task_type, payload, error_message, attempts,
-                     retry_policy, moved_at, discarded)
-                VALUES ($1, $2, '{}', 'test error', 3,
-                        '{}', $3, FALSE)
-                """,
-                task_id,
-                f"test_type_{i}",
-                utc_now(),
+            await queries.insert_dlq_task(
+                {
+                    "task_id": generate_task_id(),
+                    "task_type": f"test_type_{i}",
+                    "payload": {},
+                    "error_message": "test error",
+                    "attempts": 3,
+                    "retry_policy": {},
+                    "moved_at": utc_now(),
+                }
             )
 
         result = await health_checker.check()
@@ -141,21 +141,17 @@ class TestHealthCheck:
     async def test_pending_task_count(self, health_checker: Any) -> None:
         """Verify pending task count is reflected in health result."""
         from conductor.core.models import generate_task_id, utc_now
+        from conductor.db.queries import QueryBuilder
 
-        pool = health_checker._pool
-
-        # Insert a pending task
-        task_id = generate_task_id()
-        await pool.execute(
-            """
-            INSERT INTO conductor_tasks
-                (task_id, task_type, payload, status, priority, route,
-                 attempt, max_retries, retry_policy, created_at)
-            VALUES ($1, 'health_test', '{}', 'pending', 0, 'default',
-                    0, 3, '{"max_retries": 3}', $2)
-            """,
-            task_id,
-            utc_now(),
+        await QueryBuilder(health_checker._pool).insert_task(
+            {
+                "task_id": generate_task_id(),
+                "task_type": "health_test",
+                "payload": {},
+                "status": "pending",
+                "retry_policy": {"max_retries": 3},
+                "created_at": utc_now(),
+            }
         )
 
         result = await health_checker.check()
@@ -163,21 +159,16 @@ class TestHealthCheck:
 
     async def test_active_workers_count(self, health_checker: Any) -> None:
         """Verify active worker count is reflected in health result."""
-        pool = health_checker._pool
+        from conductor.db.queries import QueryBuilder
 
-        # Insert a worker with a recent heartbeat
-        await pool.execute(
-            """
-            INSERT INTO conductor_workers
-                (worker_id, status, hostname, pid, uptime_seconds,
-                 tasks_processed_total, tasks_failed_total, last_heartbeat,
-                 started_at)
-            VALUES ('test-worker-health', 'idle', 'test-host', 12345, 0,
-                    0, 0, NOW(), NOW())
-            ON CONFLICT (worker_id) DO UPDATE SET
-                last_heartbeat = NOW(),
-                status = 'idle'
-            """,
+        # The dialect-aware upsert also refreshes the heartbeat to "now".
+        await QueryBuilder(health_checker._pool).upsert_worker(
+            {
+                "worker_id": "test-worker-health",
+                "status": "idle",
+                "hostname": "test-host",
+                "pid": 12345,
+            }
         )
 
         result = await health_checker.check()

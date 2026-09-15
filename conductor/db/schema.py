@@ -4,271 +4,72 @@ Schema management and auto-migration for Conductor.
 Handles creation and versioning of all database tables, indexes,
 constraints, and checks.  Migrations are idempotent – running them
 multiple times is safe.
+
+The statements come from the backend's DDL plan (``conductor/db/ddl/``), so
+this module contains no SQL of its own and the same migration ledger is
+maintained on every backend.
 """
 
 from __future__ import annotations
 
 import logging
+from typing import Any, Optional
 
+from conductor.db.backends.base import SqlDialect
+from conductor.db.backends.postgres import PostgresDialect
 from conductor.db.connection import DatabasePool
+from conductor.db.ddl import SCHEMA_VERSION, SchemaDDL, get_ddl
 from conductor.exceptions import ConductorException
+
+# Re-exported for backwards compatibility: the PostgreSQL statements used to
+# live in this module and are imported by tests and by the DDL plan itself.
+from conductor.db.ddl.postgres import (  # noqa: F401
+    CREATE_DEAD_LETTER_TABLE,
+    CREATE_RECURRING_TASKS_TABLE,
+    CREATE_RETRIES_TABLE,
+    CREATE_TASKS_TABLE,
+    CREATE_VERSION_TABLE,
+    CREATE_WORKERS_TABLE,
+    DEAD_LETTER_INDEXES,
+    MIGRATE_V1_TO_V2_SQL,
+    MIGRATE_V2_TO_V3_SQL,
+    MIGRATE_V3_TO_V4_SQL,
+    MIGRATE_V4_TO_V5_SQL,
+    RECURRING_INDEXES,
+    RETRIES_INDEXES,
+    ROLLBACK_SQL,
+    TASK_INDEXES,
+    WORKER_INDEXES,
+)
 
 logger = logging.getLogger("conductor.db.schema")
 
-# ---------------------------------------------------------------------------
-# Version tracking
-# ---------------------------------------------------------------------------
-
-SCHEMA_VERSION = 5
-"""The current schema version expected by this code."""
-
-CREATE_VERSION_TABLE = """
-CREATE TABLE IF NOT EXISTS conductor_version (
-    version     INTEGER NOT NULL,
-    applied_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (version)
-);
-"""
-
-# ---------------------------------------------------------------------------
-# v0 → v1 migration
-# ---------------------------------------------------------------------------
-
-CREATE_TASKS_TABLE = """
-CREATE TABLE IF NOT EXISTS conductor_tasks (
-    task_id         TEXT        NOT NULL,
-    task_type       TEXT        NOT NULL,
-    payload         JSONB       NOT NULL DEFAULT '{}',
-    status          TEXT        NOT NULL DEFAULT 'pending',
-    priority        INTEGER     NOT NULL DEFAULT 0,
-    route           TEXT        NOT NULL DEFAULT 'default',
-    attempt         INTEGER     NOT NULL DEFAULT 0,
-    max_retries     INTEGER     NOT NULL DEFAULT 3,
-    retry_policy    JSONB       NOT NULL DEFAULT '{}',
-    depends_on      TEXT[]      NOT NULL DEFAULT '{}',
-    scheduled_for   TIMESTAMPTZ,
-    worker_id       TEXT,
-    result          JSONB,
-    error_message   TEXT,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    started_at      TIMESTAMPTZ,
-    completed_at    TIMESTAMPTZ,
-
-    CONSTRAINT pk_tasks PRIMARY KEY (task_id),
-    CONSTRAINT chk_task_status CHECK (
-        status IN (
-            'pending', 'processing', 'completed', 'failed', 'retrying',
-            'cancelled', 'blocked'
-        )
-    ),
-    CONSTRAINT chk_task_priority CHECK (priority >= -100 AND priority <= 100),
-    CONSTRAINT chk_task_attempt CHECK (attempt >= 0),
-    CONSTRAINT chk_task_max_retries CHECK (max_retries >= 0)
-);
-"""
-
-CREATE_WORKERS_TABLE = """
-CREATE TABLE IF NOT EXISTS conductor_workers (
-    worker_id           TEXT        NOT NULL,
-    status              TEXT        NOT NULL DEFAULT 'idle',
-    current_task_id     TEXT,
-    hostname            TEXT        NOT NULL DEFAULT '',
-    pid                 INTEGER     NOT NULL DEFAULT 0,
-    uptime_seconds      REAL        NOT NULL DEFAULT 0.0,
-    tasks_processed_total INTEGER   NOT NULL DEFAULT 0,
-    tasks_failed_total  INTEGER     NOT NULL DEFAULT 0,
-    last_heartbeat      TIMESTAMPTZ,
-    started_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
-    CONSTRAINT pk_workers PRIMARY KEY (worker_id),
-    CONSTRAINT chk_worker_status CHECK (
-        status IN ('idle', 'processing', 'unhealthy')
-    )
-);
-"""
-
-CREATE_RETRIES_TABLE = """
-CREATE TABLE IF NOT EXISTS conductor_retries (
-    id              TEXT        NOT NULL,
-    task_id         TEXT        NOT NULL,
-    attempt         INTEGER     NOT NULL,
-    error_message   TEXT,
-    scheduled_at    TIMESTAMPTZ NOT NULL,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
-    CONSTRAINT pk_retries PRIMARY KEY (id),
-    CONSTRAINT fk_retries_task
-        FOREIGN KEY (task_id)
-        REFERENCES conductor_tasks (task_id)
-        ON DELETE CASCADE
-);
-"""
-
-CREATE_DEAD_LETTER_TABLE = """
-CREATE TABLE IF NOT EXISTS conductor_dead_letter (
-    task_id         TEXT        NOT NULL,
-    task_type       TEXT        NOT NULL,
-    payload         JSONB       NOT NULL DEFAULT '{}',
-    error_message   TEXT,
-    attempts        INTEGER     NOT NULL DEFAULT 0,
-    retry_policy    JSONB       NOT NULL DEFAULT '{}',
-    route           TEXT        NOT NULL DEFAULT 'default',
-    priority        INTEGER     NOT NULL DEFAULT 0,
-    depends_on      TEXT[]      NOT NULL DEFAULT '{}',
-    moved_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    discarded       BOOLEAN     NOT NULL DEFAULT FALSE,
-    discard_reason  TEXT,
-    discarded_at    TIMESTAMPTZ,
-
-    CONSTRAINT pk_dead_letter PRIMARY KEY (task_id)
-);
-"""
-
-CREATE_RECURRING_TASKS_TABLE = """
-CREATE TABLE IF NOT EXISTS conductor_recurring_tasks (
-    id              TEXT        NOT NULL,
-    task_type       TEXT        NOT NULL,
-    payload         JSONB       NOT NULL DEFAULT '{}',
-    cron_expression TEXT        NOT NULL,
-    route           TEXT        NOT NULL DEFAULT 'default',
-    priority        INTEGER     NOT NULL DEFAULT 0,
-    retry_policy    JSONB       NOT NULL DEFAULT '{}',
-    enabled         BOOLEAN     NOT NULL DEFAULT TRUE,
-    next_run_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    last_run_at     TIMESTAMPTZ,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
-    CONSTRAINT pk_recurring_tasks PRIMARY KEY (id)
-);
-"""
-
-# ---------------------------------------------------------------------------
-# v1 → v2 migration
-# ---------------------------------------------------------------------------
-
-# Statements to add ``route``/``priority`` to the dead-letter table.
-# Idempotent (``IF NOT EXISTS``), so it is safe to re-run on an
-# already-migrated schema.  The columns let routed/prioritized tasks keep
-# their routing metadata when retried from the DLQ.
-MIGRATE_V1_TO_V2_SQL = [
-    "ALTER TABLE conductor_dead_letter "
-    "ADD COLUMN IF NOT EXISTS route TEXT NOT NULL DEFAULT 'default';",
-    "ALTER TABLE conductor_dead_letter "
-    "ADD COLUMN IF NOT EXISTS priority INTEGER NOT NULL DEFAULT 0;",
+__all__: list[str] = [
+    "CREATE_DEAD_LETTER_TABLE",
+    "CREATE_RECURRING_TASKS_TABLE",
+    "CREATE_RETRIES_TABLE",
+    "CREATE_TASKS_TABLE",
+    "CREATE_VERSION_TABLE",
+    "CREATE_WORKERS_TABLE",
+    "MIGRATE_V1_TO_V2_SQL",
+    "MIGRATE_V2_TO_V3_SQL",
+    "MIGRATE_V3_TO_V4_SQL",
+    "MIGRATE_V4_TO_V5_SQL",
+    "SCHEMA_VERSION",
+    "SchemaManager",
 ]
 
-# ---------------------------------------------------------------------------
-# v2 → v3 migration
-# ---------------------------------------------------------------------------
 
-# Composite index for the recurring scheduler's hot query
-# (``WHERE enabled AND next_run_at <= $1``).  Idempotent (``IF NOT EXISTS``).
-MIGRATE_V2_TO_V3_SQL = [
-    "CREATE INDEX IF NOT EXISTS idx_recurring_polling"
-    " ON conductor_recurring_tasks (enabled, next_run_at);",
-]
+def _pool_dialect(pool: Any) -> SqlDialect:
+    """Return the dialect of *pool*, defaulting to PostgreSQL.
 
-# ---------------------------------------------------------------------------
-# v3 → v4 migration
-# ---------------------------------------------------------------------------
-
-# Allow ``cancelled`` in the task status CHECK constraint.  ``DROP CONSTRAINT``
-# is idempotent, and re-adding the constraint with the extended status list
-# keeps the CHECK up to date on existing v3 databases.
-MIGRATE_V3_TO_V4_SQL = [
-    "ALTER TABLE conductor_tasks DROP CONSTRAINT chk_task_status;",
-    "ALTER TABLE conductor_tasks ADD CONSTRAINT chk_task_status CHECK ("
-    " status IN ('pending', 'processing', 'completed', 'failed', 'retrying',"
-    " 'cancelled')"
-    ");",
-]
-
-# ---------------------------------------------------------------------------
-# v4 → v5 migration
-# ---------------------------------------------------------------------------
-
-# Task dependencies: ``depends_on`` array column on tasks + dead-letter
-# (preserved across DLQ retries, like route/priority in v2), a GIN index for
-# dependency lookups, and the new ``blocked`` task status.  ``DROP CONSTRAINT``
-# is idempotent; re-adding it with ``blocked`` keeps the CHECK up to date.
-MIGRATE_V4_TO_V5_SQL = [
-    "ALTER TABLE conductor_tasks "
-    "ADD COLUMN IF NOT EXISTS depends_on TEXT[] NOT NULL DEFAULT '{}';",
-    "CREATE INDEX IF NOT EXISTS idx_tasks_depends_on" " ON conductor_tasks USING GIN (depends_on);",
-    "ALTER TABLE conductor_dead_letter "
-    "ADD COLUMN IF NOT EXISTS depends_on TEXT[] NOT NULL DEFAULT '{}';",
-    "ALTER TABLE conductor_tasks DROP CONSTRAINT chk_task_status;",
-    "ALTER TABLE conductor_tasks ADD CONSTRAINT chk_task_status CHECK ("
-    " status IN ('pending', 'processing', 'completed', 'failed', 'retrying',"
-    " 'cancelled', 'blocked')"
-    ");",
-]
-
-# ---------------------------------------------------------------------------
-# Indexes
-# ---------------------------------------------------------------------------
-
-TASK_INDEXES = [
-    "CREATE INDEX IF NOT EXISTS idx_tasks_status" " ON conductor_tasks (status);",
-    "CREATE INDEX IF NOT EXISTS idx_tasks_task_type" " ON conductor_tasks (task_type);",
-    "CREATE INDEX IF NOT EXISTS idx_tasks_route" " ON conductor_tasks (route);",
-    "CREATE INDEX IF NOT EXISTS idx_tasks_priority" " ON conductor_tasks (priority DESC);",
-    "CREATE INDEX IF NOT EXISTS idx_tasks_created_at" " ON conductor_tasks (created_at);",
-    "CREATE INDEX IF NOT EXISTS idx_tasks_scheduled_for" " ON conductor_tasks (scheduled_for);",
-    "CREATE INDEX IF NOT EXISTS idx_tasks_worker_id" " ON conductor_tasks (worker_id);",
-    # GIN index for dependency containment lookups (``depends_on @> ARRAY[...]``)
-    (
-        "CREATE INDEX IF NOT EXISTS idx_tasks_depends_on"
-        " ON conductor_tasks USING GIN (depends_on);"
-    ),
-    # Composite index used by the polling query
-    (
-        "CREATE INDEX IF NOT EXISTS idx_tasks_polling"
-        " ON conductor_tasks"
-        " (status, scheduled_for, priority DESC, created_at);"
-    ),
-]
-
-WORKER_INDEXES = [
-    "CREATE INDEX IF NOT EXISTS idx_workers_status" " ON conductor_workers (status);",
-    "CREATE INDEX IF NOT EXISTS idx_workers_last_heartbeat"
-    " ON conductor_workers (last_heartbeat);",
-]
-
-RETRIES_INDEXES = [
-    "CREATE INDEX IF NOT EXISTS idx_retries_task_id" " ON conductor_retries (task_id);",
-    "CREATE INDEX IF NOT EXISTS idx_retries_scheduled_at" " ON conductor_retries (scheduled_at);",
-]
-
-DEAD_LETTER_INDEXES = [
-    "CREATE INDEX IF NOT EXISTS idx_dead_letter_discarded" " ON conductor_dead_letter (discarded);",
-    "CREATE INDEX IF NOT EXISTS idx_dead_letter_moved_at" " ON conductor_dead_letter (moved_at);",
-]
-
-RECURRING_INDEXES = [
-    "CREATE INDEX IF NOT EXISTS idx_recurring_next_run"
-    " ON conductor_recurring_tasks (next_run_at);",
-    "CREATE INDEX IF NOT EXISTS idx_recurring_enabled" " ON conductor_recurring_tasks (enabled);",
-    "CREATE INDEX IF NOT EXISTS idx_recurring_polling"
-    " ON conductor_recurring_tasks (enabled, next_run_at);",
-]
-
-# ---------------------------------------------------------------------------
-# Rollback (v1 → v0)
-# ---------------------------------------------------------------------------
-
-ROLLBACK_SQL = [
-    "DROP TABLE IF EXISTS conductor_recurring_tasks CASCADE;",
-    "DROP TABLE IF EXISTS conductor_dead_letter CASCADE;",
-    "DROP TABLE IF EXISTS conductor_retries CASCADE;",
-    "DROP TABLE IF EXISTS conductor_workers CASCADE;",
-    "DROP TABLE IF EXISTS conductor_tasks CASCADE;",
-    "DROP TABLE IF EXISTS conductor_version CASCADE;",
-]
-
-# ---------------------------------------------------------------------------
-# SchemaManager
-# ---------------------------------------------------------------------------
+    Duck-typed pools (test doubles without a ``dialect`` attribute) fall back to
+    the PostgreSQL dialect.
+    """
+    dialect = getattr(pool, "dialect", None)
+    if isinstance(dialect, SqlDialect):
+        return dialect
+    return PostgresDialect()
 
 
 class SchemaManager:
@@ -280,14 +81,25 @@ class SchemaManager:
         await pool.connect()
         mgr = SchemaManager(pool)
         await mgr.ensure_schema()   # auto-migrate on startup
+
+    Args:
+        pool: The connection pool whose backend DDL plan is applied.
+        ddl: Optional explicit DDL plan (defaults to the pool's backend).
     """
 
-    def __init__(self, pool: DatabasePool) -> None:
-        self._pool = pool
+    def __init__(self, pool: DatabasePool, ddl: Optional[SchemaDDL] = None) -> None:
+        self._pool: Any = pool
+        self._dialect: SqlDialect = _pool_dialect(pool)
+        self._ddl: SchemaDDL = ddl or get_ddl(self._dialect.name)
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    @property
+    def backend(self) -> str:
+        """The backend this manager maintains (``postgresql``, ``sqlite``, …)."""
+        return self._ddl.backend
 
     async def ensure_schema(self) -> None:
         """Ensure the database schema is up-to-date.
@@ -335,7 +147,7 @@ class SchemaManager:
             target_version,
         )
 
-        for stmt in ROLLBACK_SQL:
+        for stmt in self._ddl.rollback_statements:
             await self._pool.execute(stmt)
 
         logger.info("Schema rollback complete.")
@@ -345,144 +157,71 @@ class SchemaManager:
     # ------------------------------------------------------------------
 
     async def _create_version_table(self) -> None:
-        await self._pool.execute(CREATE_VERSION_TABLE)
+        await self._pool.execute(self._ddl.version_table)
 
     async def _get_current_version(self) -> int:
         row = await self._pool.fetchrow(
             "SELECT COALESCE(MAX(version), 0) AS v FROM conductor_version"
         )
-        return row["v"] if row else 0
+        if not row:
+            return 0
+        value = row["v"]
+        return int(value) if value is not None else 0
+
+    async def _record_version(self, conn: Any, version: int) -> None:
+        """Record an applied migration step (idempotent)."""
+        dialect = self._dialect
+        conflict = dialect.insert_ignore(["version"])
+        await conn.execute(
+            "INSERT INTO conductor_version (version) VALUES ("
+            f"{dialect.placeholder(1)}) {conflict}",
+            version,
+        )
 
     async def _migrate_v0_to_v1(self) -> None:
         """Run the full v0 → v1 migration (tables + indexes)."""
         async with self._pool.acquire() as conn:
             async with conn.transaction():
-                # Create tables
-                await conn.execute(CREATE_TASKS_TABLE)
-                await conn.execute(CREATE_WORKERS_TABLE)
-                await conn.execute(CREATE_RETRIES_TABLE)
-                await conn.execute(CREATE_DEAD_LETTER_TABLE)
-                await conn.execute(CREATE_RECURRING_TASKS_TABLE)
-
-                # Create indexes
-                for idx_sql in TASK_INDEXES:
-                    await conn.execute(idx_sql)
-                for idx_sql in WORKER_INDEXES:
-                    await conn.execute(idx_sql)
-                for idx_sql in RETRIES_INDEXES:
-                    await conn.execute(idx_sql)
-                for idx_sql in DEAD_LETTER_INDEXES:
-                    await conn.execute(idx_sql)
-                for idx_sql in RECURRING_INDEXES:
-                    await conn.execute(idx_sql)
-
-                # Record version
-                await conn.execute(
-                    "INSERT INTO conductor_version (version) VALUES ($1) "
-                    "ON CONFLICT (version) DO NOTHING",
-                    1,
-                )
+                for statement in self._ddl.create_statements:
+                    await conn.execute(statement)
+                for statement in self._ddl.index_statements:
+                    await conn.execute(statement)
+                await self._record_version(conn, 1)
 
         logger.info("Migration v0 → v1 completed successfully.")
 
-    async def _migrate_v1_to_v2(self) -> None:
-        """Run the v1 → v2 migration (dead-letter route/priority columns).
-
-        The columns are idempotently added so this is safe on both fresh
-        installs (where the base table already includes them) and existing
-        v1 databases.
-        """
-        async with self._pool.acquire() as conn:
-            async with conn.transaction():
-                for stmt in MIGRATE_V1_TO_V2_SQL:
-                    await conn.execute(stmt)
-
-                # Record version
-                await conn.execute(
-                    "INSERT INTO conductor_version (version) VALUES ($1) "
-                    "ON CONFLICT (version) DO NOTHING",
-                    2,
-                )
-
-        logger.info("Migration v1 → v2 completed successfully.")
-
-    async def _migrate_v2_to_v3(self) -> None:
-        """Run the v2 → v3 migration (recurring scheduler composite index).
-
-        Adds an index on ``(enabled, next_run_at)`` for the recurring
-        scheduler's hot query.  Idempotent (``IF NOT EXISTS``), safe on both
-        fresh installs and existing v2 databases.
-        """
-        async with self._pool.acquire() as conn:
-            async with conn.transaction():
-                for stmt in MIGRATE_V2_TO_V3_SQL:
-                    await conn.execute(stmt)
-
-                # Record version
-                await conn.execute(
-                    "INSERT INTO conductor_version (version) VALUES ($1) "
-                    "ON CONFLICT (version) DO NOTHING",
-                    3,
-                )
-
-        logger.info("Migration v2 → v3 completed successfully.")
-
-    async def _migrate_v3_to_v4(self) -> None:
-        """Run the v3 → v4 migration (``cancelled`` task status).
-
-        Rebuilds the ``chk_task_status`` CHECK constraint to allow the new
-        ``cancelled`` status, and records schema version 4.
-        """
-        async with self._pool.acquire() as conn:
-            async with conn.transaction():
-                for stmt in MIGRATE_V3_TO_V4_SQL:
-                    await conn.execute(stmt)
-
-                # Record version
-                await conn.execute(
-                    "INSERT INTO conductor_version (version) VALUES ($1) "
-                    "ON CONFLICT (version) DO NOTHING",
-                    4,
-                )
-
-        logger.info("Migration v3 → v4 completed successfully.")
-
-    async def _migrate_v4_to_v5(self) -> None:
-        """Run the v4 → v5 migration (``depends_on`` + ``blocked`` status).
-
-        Adds the ``depends_on`` array column to the tasks and dead-letter
-        tables, creates a GIN index for dependency lookups, and rebuilds
-        ``chk_task_status`` to allow the new ``blocked`` status.
-        """
-        async with self._pool.acquire() as conn:
-            async with conn.transaction():
-                for stmt in MIGRATE_V4_TO_V5_SQL:
-                    await conn.execute(stmt)
-
-                # Record version
-                await conn.execute(
-                    "INSERT INTO conductor_version (version) VALUES ($1) "
-                    "ON CONFLICT (version) DO NOTHING",
-                    5,
-                )
-
-        logger.info("Migration v4 → v5 completed successfully.")
-
     async def _run_migration(self, target_version: int) -> None:
         """Run the single migration step that lands on *target_version*.
+
+        Args:
+            target_version: Schema version to migrate to.  Step 1 creates the
+                full base schema; later steps apply the backend's incremental
+                statements (which may legitimately be empty for a backend that
+                shipped with a later shape).
 
         Raises:
             ConductorException: If no migration is defined for the target.
         """
         if target_version == 1:
             await self._migrate_v0_to_v1()
-        elif target_version == 2:
-            await self._migrate_v1_to_v2()
-        elif target_version == 3:
-            await self._migrate_v2_to_v3()
-        elif target_version == 4:
-            await self._migrate_v3_to_v4()
-        elif target_version == 5:
-            await self._migrate_v4_to_v5()
-        else:
-            raise ConductorException(f"No migration defined for schema v{target_version}.")
+            return
+
+        if target_version not in self._ddl.migrations:
+            raise ConductorException(
+                f"No migration defined for schema v{target_version} "
+                f"(backend '{self._ddl.backend}')."
+            )
+
+        statements = self._ddl.statements_for(target_version)
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                for statement in statements:
+                    await conn.execute(statement)
+                await self._record_version(conn, target_version)
+
+        logger.info(
+            "Migration v%s → v%s completed successfully (%d statement(s)).",
+            target_version - 1,
+            target_version,
+            len(statements),
+        )

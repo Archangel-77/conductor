@@ -24,6 +24,7 @@ from typing import Any, Optional
 from conductor.circuit_breaker import CircuitBreakerConfig
 from conductor.core.worker import Worker
 from conductor.exceptions import ConductorException
+from conductor.observability.tracing import TracingConfig
 
 # ---------------------------------------------------------------------------
 # Environment parsing helpers
@@ -80,7 +81,8 @@ class WorkerSettings:
     """Typed worker configuration sourced from environment variables.
 
     Attributes:
-        database_url: PostgreSQL connection URI (required).
+        database_url: Database URL; the scheme selects the backend
+            (``postgresql://``, ``sqlite:///`` or ``mysql://``).
         worker_id: Worker identifier (defaults to ``hostname-pid``).
         concurrency: Maximum concurrent tasks per worker.
         poll_interval: Seconds between task polls.
@@ -90,6 +92,7 @@ class WorkerSettings:
         pool_max_size: Maximum connection pool size.
         pool_timeout: Connection acquisition timeout in seconds.
         command_timeout: SQL command timeout in seconds.
+        db_busy_timeout: SQLite only – seconds to wait for a locked database.
         heartbeat_interval: Heartbeat frequency in seconds.
         graceful_shutdown_timeout: Seconds to wait for in-flight tasks.
         metrics_port: Metrics/health HTTP server port.
@@ -112,6 +115,12 @@ class WorkerSettings:
             half-open.
         handlers_module: Optional dotted path to a module exposing a
             ``register(worker)`` function that attaches task handlers.
+        tracing_enabled: Emit OpenTelemetry spans (requires the ``otel`` extra).
+        tracing_exporter: ``none``, ``console`` or ``otlp``.
+        otel_service_name: Value reported as ``service.name`` on spans.
+        otel_exporter_otlp_endpoint: OTLP endpoint (falls back to
+            ``OTEL_EXPORTER_OTLP_ENDPOINT``).
+        tracing_sample_ratio: Fraction of traces to sample (0.0–1.0).
     """
 
     database_url: str
@@ -124,6 +133,7 @@ class WorkerSettings:
     pool_max_size: int = 10
     pool_timeout: float = 30.0
     command_timeout: float = 60.0
+    db_busy_timeout: float = 5.0
     heartbeat_interval: float = 10.0
     graceful_shutdown_timeout: float = 30.0
     metrics_port: int = 8000
@@ -141,6 +151,11 @@ class WorkerSettings:
     circuit_breaker_timeout: float = 60.0
     circuit_breaker_half_open_attempts: int = 2
     handlers_module: Optional[str] = None
+    tracing_enabled: bool = False
+    tracing_exporter: str = "otlp"
+    otel_service_name: str = "conductor"
+    otel_exporter_otlp_endpoint: Optional[str] = None
+    tracing_sample_ratio: float = 1.0
 
     @classmethod
     def from_env(cls) -> WorkerSettings:
@@ -166,6 +181,7 @@ class WorkerSettings:
             pool_max_size=_env_int("DB_MAX_SIZE", 10),
             pool_timeout=_env_float("DB_TIMEOUT", 30.0),
             command_timeout=_env_float("DB_COMMAND_TIMEOUT", 60.0),
+            db_busy_timeout=_env_float("DB_BUSY_TIMEOUT", 5.0),
             heartbeat_interval=_env_float("HEARTBEAT_INTERVAL", 10.0),
             graceful_shutdown_timeout=_env_float("GRACEFUL_SHUTDOWN_TIMEOUT", 30.0),
             metrics_port=_env_int("METRICS_PORT", 8000),
@@ -185,6 +201,11 @@ class WorkerSettings:
                 "CONDUCTOR_CIRCUIT_BREAKER_HALF_OPEN_ATTEMPTS", 2
             ),
             handlers_module=os.getenv("CONDUCTOR_HANDLERS_MODULE") or None,
+            tracing_enabled=_env_bool("TRACING_ENABLED", False),
+            tracing_exporter=os.getenv("TRACING_EXPORTER", "otlp").lower(),
+            otel_service_name=os.getenv("OTEL_SERVICE_NAME", "conductor"),
+            otel_exporter_otlp_endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT") or None,
+            tracing_sample_ratio=_env_float("TRACING_SAMPLE_RATIO", 1.0),
         )
 
     def build_worker(self) -> Worker:
@@ -200,6 +221,7 @@ class WorkerSettings:
             pool_max_size=self.pool_max_size,
             pool_timeout=self.pool_timeout,
             command_timeout=self.command_timeout,
+            busy_timeout=self.db_busy_timeout,
             heartbeat_interval=self.heartbeat_interval,
             graceful_shutdown_timeout=self.graceful_shutdown_timeout,
             metrics_port=self.metrics_port,
@@ -222,6 +244,17 @@ class WorkerSettings:
                 if self.circuit_breaker_enabled
                 else None
             ),
+            tracing_config=(
+                TracingConfig(
+                    enabled=self.tracing_enabled,
+                    service_name=self.otel_service_name,
+                    exporter=self.tracing_exporter,
+                    endpoint=self.otel_exporter_otlp_endpoint,
+                    sample_ratio=self.tracing_sample_ratio,
+                )
+                if self.tracing_enabled
+                else None
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -237,6 +270,7 @@ class WorkerSettings:
             "pool_max_size": self.pool_max_size,
             "pool_timeout": self.pool_timeout,
             "command_timeout": self.command_timeout,
+            "db_busy_timeout": self.db_busy_timeout,
             "heartbeat_interval": self.heartbeat_interval,
             "graceful_shutdown_timeout": self.graceful_shutdown_timeout,
             "metrics_port": self.metrics_port,
@@ -253,5 +287,10 @@ class WorkerSettings:
             "circuit_breaker_threshold": self.circuit_breaker_threshold,
             "circuit_breaker_timeout": self.circuit_breaker_timeout,
             "circuit_breaker_half_open_attempts": self.circuit_breaker_half_open_attempts,
+            "tracing_enabled": self.tracing_enabled,
+            "tracing_exporter": self.tracing_exporter,
+            "otel_service_name": self.otel_service_name,
+            "otel_exporter_otlp_endpoint": self.otel_exporter_otlp_endpoint,
+            "tracing_sample_ratio": self.tracing_sample_ratio,
             "handlers_module": self.handlers_module,
         }

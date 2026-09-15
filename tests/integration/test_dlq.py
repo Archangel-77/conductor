@@ -191,7 +191,8 @@ class TestDeadLetterQueue:
 
         # Set a worker_id so we can verify it gets cleared
         await dlq._pool.execute(
-            "UPDATE conductor_tasks SET worker_id = 'worker-1' WHERE task_id = $1",
+            "UPDATE conductor_tasks SET worker_id = 'worker-1' "
+            f"WHERE task_id = {dlq._pool.dialect.placeholder(1)}",
             task_id,
         )
 
@@ -315,7 +316,7 @@ class TestDeadLetterQueue:
 
         # Simulate the task row being cascade-deleted
         await dlq._pool.execute(
-            "DELETE FROM conductor_tasks WHERE task_id = $1",
+            f"DELETE FROM conductor_tasks WHERE task_id = {dlq._pool.dialect.placeholder(1)}",
             task_id,
         )
 
@@ -346,7 +347,7 @@ class TestDeadLetterQueue:
 
         # Simulate the task row being cascade-deleted
         await dlq._pool.execute(
-            "DELETE FROM conductor_tasks WHERE task_id = $1",
+            f"DELETE FROM conductor_tasks WHERE task_id = {dlq._pool.dialect.placeholder(1)}",
             task_id,
         )
 

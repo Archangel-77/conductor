@@ -48,7 +48,7 @@ from conductor.core.queue import _task_to_db_dict
 from conductor.db.connection import DatabasePool
 from conductor.db.queries import QueryBuilder
 from conductor.db.schema import SchemaManager
-from conductor.exceptions import WorkerError
+from conductor.exceptions import TracingError, WorkerError
 from conductor.observability.metrics import (
     inc_tasks_completed,
     inc_tasks_failed,
@@ -59,6 +59,8 @@ from conductor.observability.metrics import (
 )
 from conductor.observability.health import HealthChecker
 from conductor.observability.metrics import MetricsExporter
+from conductor.observability import tracing
+from conductor.observability.tracing import TracingConfig
 
 logger = logging.getLogger("conductor.core.worker")
 
@@ -70,7 +72,7 @@ HandlerFunc = Callable[[dict[str, Any]], Awaitable[Optional[dict[str, Any]]]]
 class Worker:
     """Poll-based task worker that dispatches work to registered handlers.
 
-    Manages its own PostgreSQL connection pool.  Can be used as an async
+    Manages its own database connection pool.  Can be used as an async
     context manager::
 
         async with Worker(database_url="postgresql://...") as worker:
@@ -93,6 +95,7 @@ class Worker:
         pool_max_size: int = 10,
         pool_timeout: float = 30.0,
         command_timeout: float = 60.0,
+        busy_timeout: float = 5.0,
         heartbeat_interval: float = 10.0,
         graceful_shutdown_timeout: float = 30.0,
         metrics_port: int = 8000,
@@ -108,6 +111,7 @@ class Worker:
         circuit_breaker_enabled: bool = False,
         circuit_breaker_config: Optional[CircuitBreakerConfig] = None,
         circuit_breaker_overrides: Optional[dict[str, CircuitBreakerConfig]] = None,
+        tracing_config: Optional[TracingConfig] = None,
     ) -> None:
         # Worker identity
         hostname = get_hostname()
@@ -148,6 +152,9 @@ class Worker:
             else None
         )
 
+        # Tracing (optional; the span path is a no-op when disabled)
+        self._tracing_config = tracing_config
+
         # Apply log level
         logging.getLogger("conductor").setLevel(log_level.upper())
 
@@ -159,6 +166,7 @@ class Worker:
             max_size=pool_max_size,
             timeout=pool_timeout,
             command_timeout=command_timeout,
+            busy_timeout=busy_timeout,
         )
         self._queries: Optional[QueryBuilder] = None
         self._connected = False
@@ -353,6 +361,17 @@ class Worker:
                 name=f"recurring-scheduler-{self._worker_id}",
             )
 
+        # Start distributing tracing (optional)
+        if self._tracing_config is not None and self._tracing_config.enabled:
+            try:
+                tracing.setup_tracing(self._tracing_config)
+            except TracingError as exc:
+                logger.warning(
+                    "Tracing requested but unavailable: %s. Worker will continue "
+                    "without tracing.",
+                    exc,
+                )
+
         # Start metrics/health HTTP server
         if self._metrics_enabled or self._health_enabled:
             health_checker = HealthChecker(self._pool)
@@ -525,6 +544,7 @@ class Worker:
         task_id: str,
         task_type: str,
         payload: dict[str, Any],
+        traceparent: Optional[str] = None,
     ) -> Optional[Task]:
         """Insert a task row (if needed) and execute it through the lifecycle.
 
@@ -538,6 +558,8 @@ class Worker:
                 belongs to a different task).
             task_type: The task type to execute.
             payload: The payload to store and pass to the handler.
+            traceparent: Optional W3C ``traceparent`` from the caller (gRPC),
+                so the execution continues the caller's trace.
         """
         queries = self._queries
         assert queries is not None
@@ -551,6 +573,7 @@ class Worker:
                 payload=payload,
                 status=TaskStatus.PENDING,
                 created_at=now,
+                traceparent=traceparent,
             )
             await queries.insert_task(_task_to_db_dict(task))
         else:
@@ -629,6 +652,31 @@ class Worker:
     # ------------------------------------------------------------------
 
     async def _execute_task(self, task: Task) -> None:
+        """Execute a task inside a trace span.
+
+        The span continues the submitting trace when the task carries a W3C
+        ``traceparent`` (schema v6), so every attempt is a child of the
+        submission span — attempts show up as siblings, which matches reality:
+        they are independent executions of one submitted task.
+
+        Args:
+            task: The ``Task`` to execute.
+        """
+        with tracing.span(
+            tracing.SPAN_EXECUTE,
+            parent=tracing.extract_traceparent(task.traceparent),
+            attributes={
+                tracing.ATTR_TASK_ID: task.task_id,
+                tracing.ATTR_TASK_TYPE: task.task_type,
+                tracing.ATTR_TASK_ROUTE: task.route,
+                tracing.ATTR_TASK_PRIORITY: task.priority,
+                tracing.ATTR_TASK_ATTEMPT: task.attempt,
+                tracing.ATTR_WORKER_ID: self._worker_id,
+            },
+        ):
+            await self._execute_task_traced(task)
+
+    async def _execute_task_traced(self, task: Task) -> None:
         """Execute a single task: update status, call handler, record result.
 
         Args:
@@ -664,6 +712,7 @@ class Worker:
                 f"No handler registered for task_type '{task_type}'. "
                 f"Registered types: {list(self._handlers.keys())}"
             )
+            tracing.record_error(error_msg)
             await self._handle_task_failure(task, error_msg)
             self._tasks_failed_total += 1
             self._current_task_id = None
@@ -691,6 +740,7 @@ class Worker:
             )
             inc_tasks_failed(task_type)
             observe_task_duration(task_type, duration_sec)
+            tracing.record_error(error_msg, handler_exc)
             if breaker is not None:
                 breaker.record_failure()
                 self._set_circuit_breaker_metric(task_type, breaker)
@@ -715,6 +765,7 @@ class Worker:
 
         inc_tasks_completed(task_type)
         observe_task_duration(task_type, duration_sec)
+        tracing.mark_success()
 
         if breaker is not None:
             breaker.record_success()
@@ -800,6 +851,14 @@ class Worker:
 
             inc_tasks_retried(task.task_type)
 
+            tracing.add_event(
+                "retry.scheduled",
+                {
+                    tracing.ATTR_TASK_ATTEMPT: new_attempt,
+                    "retry.delay_seconds": delay,
+                },
+            )
+
             logger.info(
                 "Task %s failed (attempt %d/%d). Retrying in %.2fs.",
                 task.task_id,
@@ -816,6 +875,13 @@ class Worker:
         else:
             # Max retries exceeded — move to dead-letter queue
             now = utc_now()
+            tracing.add_event(
+                "task.dlq",
+                {
+                    tracing.ATTR_TASK_ATTEMPT: new_attempt,
+                    "dlq.reason": error_message,
+                },
+            )
             # Build the dict manually so datetime objects stay native
             await queries.insert_dlq_task(
                 {
@@ -828,6 +894,7 @@ class Worker:
                     "route": task.route,
                     "priority": task.priority,
                     "depends_on": task.depends_on,
+                    "traceparent": task.traceparent,
                     "moved_at": now,
                 }
             )
@@ -874,22 +941,29 @@ class Worker:
         error_message = f"dependency '{task_id}' failed"
         frontier = [task_id]
         seen: set[str] = set()
-        for _ in range(200):
-            newly_blocked: list[str] = []
-            for tid in frontier:
-                for dep in await queries.mark_dependents_blocked(tid, error_message):
-                    if dep not in seen:
-                        seen.add(dep)
-                        newly_blocked.append(dep)
-                        logger.warning(
-                            "Task %s blocked because its dependency '%s' failed.",
-                            dep,
-                            tid,
-                            extra={"task_id": dep, "error": error_message},
-                        )
-            if not newly_blocked:
-                break
-            frontier = newly_blocked
+        with tracing.span(
+            tracing.SPAN_BLOCK_DEPENDENTS,
+            attributes={"dependency.task_id": task_id},
+        ) as active:
+            for _ in range(200):
+                newly_blocked: list[str] = []
+                for tid in frontier:
+                    for dep in await queries.mark_dependents_blocked(tid, error_message):
+                        if dep not in seen:
+                            seen.add(dep)
+                            newly_blocked.append(dep)
+                            logger.warning(
+                                "Task %s blocked because its dependency '%s' failed.",
+                                dep,
+                                tid,
+                                extra={"task_id": dep, "error": error_message},
+                            )
+                if not newly_blocked:
+                    break
+                frontier = newly_blocked
+            if seen:
+                active.set_attribute("blocked.count", len(seen))
+                active.set_attribute("blocked.task_ids", sorted(seen))
 
     async def _update_status(
         self,
@@ -1037,6 +1111,10 @@ class Worker:
         if self._dashboard_server is not None:
             await self._dashboard_server.stop()
             self._dashboard_server = None
+
+        # Flush pending spans (no-op when tracing is disabled)
+        if self._tracing_config is not None:
+            tracing.shutdown_tracing()
 
         # Wait for in-flight tasks to complete (with timeout)
         if self._in_flight_tasks:
@@ -1204,6 +1282,12 @@ class Worker:
                 self._circuit_breaker_registry.open_types()
                 if self._circuit_breaker_registry is not None
                 else []
+            ),
+            "tracing_enabled": tracing.is_enabled(),
+            "tracing_exporter": (
+                self._tracing_config.exporter
+                if self._tracing_config is not None and tracing.is_enabled()
+                else "none"
             ),
         }
 

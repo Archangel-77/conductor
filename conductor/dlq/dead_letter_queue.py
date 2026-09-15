@@ -234,6 +234,7 @@ class DeadLetterQueue:
                 "created_at": now,
                 "started_at": None,
                 "completed_at": None,
+                "traceparent": dlq_row.get("traceparent"),
             }
             await self._query.insert_task(task_dict)
 

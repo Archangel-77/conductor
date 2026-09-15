@@ -32,5 +32,9 @@ class CircuitBreakerError(ConductorException):
     """Raised when circuit-breaker configuration is invalid."""
 
 
+class TracingError(ConductorException):
+    """Raised when tracing configuration is invalid or unusable."""
+
+
 class ConductorConnectionError(ConductorException):
     """Raised when a database connection cannot be established."""

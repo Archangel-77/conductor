@@ -3,17 +3,53 @@ Unit tests for SchemaManager (database schema creation & migrations).
 
 These tests require a running PostgreSQL instance (see ``docker-compose.yml``).
 They are skipped automatically if the database is unreachable.
+
+They are also **PostgreSQL-specific by design**: the assertions read
+``pg_catalog``/``pg_indexes``, drive the PostgreSQL migration ladder
+(``ALTER TABLE … DROP CONSTRAINT``, the v3→v6 simulation) and use ``$n``
+placeholders.  Cross-backend schema behaviour is covered by
+``tests/integration/test_backend_matrix.py``, which calls ``ensure_schema()``
+and exercises every table on each configured backend.
 """
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
+import pytest_asyncio
 
 from conductor.db.schema import SCHEMA_VERSION, CREATE_VERSION_TABLE
 
-pytestmark = pytest.mark.integration
+
+def _is_postgres_backend() -> bool:
+    """``True`` when the configured test database is PostgreSQL.
+
+    The catalogue queries and migration simulations below only make sense for
+    PostgreSQL; on any other backend the module is skipped rather than failed.
+    """
+    from tests.conftest import TEST_DATABASE_URL
+
+    from conductor.db.backends.registry import detect_backend
+    from conductor.exceptions import ConductorConnectionError
+
+    try:
+        return detect_backend(TEST_DATABASE_URL) == "postgresql"
+    except ConductorConnectionError:
+        return False
+
+
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(
+        not _is_postgres_backend(),
+        reason=(
+            "PostgreSQL-specific schema/catalogue assertions; the cross-backend "
+            "schema contract is covered by tests/integration/test_backend_matrix.py"
+        ),
+    ),
+]
 
 
 # ===================================================================
@@ -24,7 +60,7 @@ pytestmark = pytest.mark.integration
 class TestSchemaConstants:
 
     def test_schema_version(self) -> None:
-        assert SCHEMA_VERSION == 5
+        assert SCHEMA_VERSION == 6
 
     def test_version_table_sql(self) -> None:
         assert "conductor_version" in CREATE_VERSION_TABLE
@@ -59,10 +95,10 @@ class TestTableCreation:
             assert row is not None, f"Table '{table}' not found"
 
     async def test_version_tracked(self, db_pool: Any) -> None:
-        """The conductor_version table should record the latest version (5)."""
+        """The conductor_version table should record the latest version (6)."""
         row = await db_pool.fetchrow("SELECT MAX(version) AS version FROM conductor_version")
         assert row is not None
-        assert row["version"] == 5
+        assert row["version"] == 6
 
 
 # ===================================================================
@@ -233,6 +269,21 @@ class TestRollback:
 
 class TestMigrationUpgrade:
 
+    @pytest_asyncio.fixture(autouse=True, loop_scope="session")
+    async def _restore_schema(
+        self, schema_manager: Any  # pylint: disable=unused-argument
+    ) -> AsyncIterator[None]:
+        """Rebuild the schema after each destructive test.
+
+        These tests simulate older databases by dropping columns/indexes and
+        deleting version rows.  Without this teardown, a failing assertion would
+        leave the shared database degraded for later tests *and* for the next
+        run (the database file/persists between runs).
+        """
+        yield
+        await schema_manager.rollback(0)
+        await schema_manager.ensure_schema()
+
     async def test_migrates_older_db_to_latest(self, schema_manager: Any, db_pool: Any) -> None:
         """An older (v2) database is upgraded to the latest version by ensure_schema()."""
         # Simulate a v2 database: drop the v3-only index and the v3 version row
@@ -246,7 +297,7 @@ class TestMigrationUpgrade:
         await schema_manager.ensure_schema()
 
         current = await schema_manager.get_current_version()
-        assert current == 5
+        assert current == 6
 
         # Index is back
         row = await db_pool.fetchrow(
@@ -279,7 +330,7 @@ class TestMigrationUpgrade:
         await schema_manager.ensure_schema()
 
         current = await schema_manager.get_current_version()
-        assert current == 5
+        assert current == 6
 
         # The new status is accepted by the migrated constraint
         result = await db_pool.execute(
@@ -292,19 +343,19 @@ class TestMigrationUpgrade:
 
     async def test_migrates_v4_to_v5(self, schema_manager: Any, db_pool: Any) -> None:
         """A v4 database gains ``depends_on`` + the ``blocked`` status."""
-        # Simulate a v4 database: drop the v5 column/index + version row.
+        # Simulate a v4 database: drop the v5 column/index + the v5/v6 rows.
         await db_pool.execute("ALTER TABLE conductor_tasks DROP COLUMN IF EXISTS depends_on")
         await db_pool.execute("DROP INDEX IF EXISTS idx_tasks_depends_on")
-        await db_pool.execute("DELETE FROM conductor_version WHERE version = 5")
+        await db_pool.execute("DELETE FROM conductor_version WHERE version >= 5")
 
         current = await schema_manager.get_current_version()
         assert current == 4
 
-        # Upgrade back to v5.
+        # Upgrade back to the latest version.
         await schema_manager.ensure_schema()
 
         current = await schema_manager.get_current_version()
-        assert current == 5
+        assert current == 6
 
         # The depends_on column exists and accepts a task with dependencies.
         rows = await db_pool.fetch(
@@ -321,3 +372,43 @@ class TestMigrationUpgrade:
             ["some-dep"],
         )
         assert "INSERT" in result
+
+    async def test_migrates_v5_to_v6(self, schema_manager: Any, db_pool: Any) -> None:
+        """A v5 database gains the tracing ``traceparent`` columns."""
+        # Simulate a v5 database: drop the v6 columns and their version row.
+        await db_pool.execute("ALTER TABLE conductor_tasks DROP COLUMN IF EXISTS traceparent")
+        await db_pool.execute("ALTER TABLE conductor_dead_letter DROP COLUMN IF EXISTS traceparent")
+        await db_pool.execute("DELETE FROM conductor_version WHERE version = 6")
+
+        current = await schema_manager.get_current_version()
+        assert current == 5
+
+        # Upgrade back to the latest version.
+        await schema_manager.ensure_schema()
+
+        current = await schema_manager.get_current_version()
+        assert current == 6
+
+        # Both tables carry the column again and it round-trips.
+        for table in ("conductor_tasks", "conductor_dead_letter"):
+            rows = await db_pool.fetch(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = $1 AND column_name = 'traceparent'",
+                table,
+            )
+            assert rows, f"{table} is missing traceparent"
+
+        traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        await db_pool.execute(
+            "INSERT INTO conductor_tasks (task_id, task_type, status, traceparent) "
+            "VALUES ($1, $2, 'pending', $3)",
+            "v5-migrated-trace",
+            "test",
+            traceparent,
+        )
+        row = await db_pool.fetchrow(
+            "SELECT traceparent FROM conductor_tasks WHERE task_id = $1",
+            "v5-migrated-trace",
+        )
+        assert row is not None
+        assert row["traceparent"] == traceparent

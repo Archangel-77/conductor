@@ -142,6 +142,7 @@ def setup_logging(
 
     root.addHandler(handler)
     root.addFilter(HostnameFilter())
+    root.addFilter(SpanContextFilter())
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +161,25 @@ class HostnameFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         record.hostname = self._hostname
         record.pid = self._pid
+        return True
+
+
+class SpanContextFilter(logging.Filter):
+    """Inject ``trace_id``/``span_id`` from the active span into records.
+
+    Only added when a trace is actually active, so logs stay unchanged when
+    tracing is disabled (the ``JsonFormatter`` emits whatever extra keys the
+    record carries).
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        from conductor.observability import tracing
+
+        trace_id, span_id = tracing.current_trace_ids()
+        if trace_id is not None:
+            record.trace_id = trace_id
+        if span_id is not None:
+            record.span_id = span_id
         return True
 
 

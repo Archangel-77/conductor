@@ -195,6 +195,9 @@ class Task:
     completed_at: Optional[datetime] = None
     """Timestamp when the task completed (success or failure)."""
 
+    traceparent: Optional[str] = None
+    """W3C ``traceparent`` of the span that submitted the task (v0.3+)."""
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-friendly dictionary."""
         result: dict[str, Any] = asdict(self)
@@ -361,6 +364,9 @@ class DLQTask:
 
     discarded_at: Optional[datetime] = None
     """When the task was discarded."""
+
+    traceparent: Optional[str] = None
+    """W3C ``traceparent`` of the submission that created the task."""
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-friendly dictionary."""

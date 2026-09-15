@@ -38,6 +38,7 @@ from conductor.db.connection import DatabasePool
 from conductor.db.queries import QueryBuilder
 from conductor.db.schema import SchemaManager
 from conductor.observability.metrics import inc_recurring_fired
+from conductor.observability import tracing
 
 logger = logging.getLogger("conductor.recurring.scheduler")
 
@@ -251,28 +252,38 @@ class RecurringScheduler:
         queries = self._queries
         assert queries is not None
 
-        task = Task(
-            task_id=generate_task_id(),
-            task_type=recurring.task_type,
-            payload=recurring.payload,
-            status=TaskStatus.PENDING,
-            priority=recurring.priority,
-            route=recurring.route,
-            retry_policy=recurring.retry_policy,
-            attempt=0,
-            max_retries=recurring.retry_policy.max_retries,
-            created_at=now,
-        )
-        await queries.insert_task(_task_to_db_dict(task), conn=conn)
+        with tracing.span(
+            tracing.SPAN_RECURRING_FIRE,
+            attributes={
+                tracing.ATTR_TASK_TYPE: recurring.task_type,
+                tracing.ATTR_TASK_ROUTE: recurring.route,
+                "recurring.id": recurring.id,
+            },
+        ):
+            task = Task(
+                task_id=generate_task_id(),
+                task_type=recurring.task_type,
+                payload=recurring.payload,
+                status=TaskStatus.PENDING,
+                priority=recurring.priority,
+                route=recurring.route,
+                retry_policy=recurring.retry_policy,
+                attempt=0,
+                max_retries=recurring.retry_policy.max_retries,
+                created_at=now,
+                # Each instance gets a fresh trace, childed to this fire span.
+                traceparent=tracing.current_traceparent(),
+            )
+            await queries.insert_task(_task_to_db_dict(task), conn=conn)
 
-        # Advance to the next cron fire after now (UTC, skip missed runs).
-        next_run_at = _next_cron_run(recurring.cron_expression, now)
-        await queries.update_recurring_run(
-            recurring.id,
-            last_run_at=now,
-            next_run_at=next_run_at,
-            conn=conn,
-        )
+            # Advance to the next cron fire after now (UTC, skip missed runs).
+            next_run_at = _next_cron_run(recurring.cron_expression, now)
+            await queries.update_recurring_run(
+                recurring.id,
+                last_run_at=now,
+                next_run_at=next_run_at,
+                conn=conn,
+            )
 
         inc_recurring_fired(recurring.task_type)
         logger.info(

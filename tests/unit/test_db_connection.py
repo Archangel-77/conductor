@@ -135,8 +135,10 @@ class TestDatabasePoolQueries:
         assert row["b"] == 2
 
     async def test_execute(self, db_pool: Any) -> None:
-        tag = await db_pool.execute("SELECT 1")
-        assert isinstance(tag, str)
+        result = await db_pool.execute("SELECT 1")
+        # PostgreSQL/SQLite report a command tag, MySQL an integer row count.
+        assert isinstance(result, (str, int))
+        assert db_pool.dialect.normalize_rowcount(result) >= 0
 
     async def test_acquire_context_manager(self, db_pool: Any) -> None:
         async with db_pool.acquire() as conn:

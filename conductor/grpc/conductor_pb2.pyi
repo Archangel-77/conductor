@@ -15,6 +15,7 @@ class TaskRequest:
     task_type: str
     payload: bytes
     persist: bool
+    traceparent: str
 
     def __init__(self, **_kwargs: Any) -> None: ...
 
@@ -24,6 +25,7 @@ class TaskResponse:
     success: bool
     result: bytes
     error: str
+    traceparent: str
 
     def __init__(self, **_kwargs: Any) -> None: ...
 

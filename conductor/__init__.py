@@ -1,6 +1,7 @@
 """
 Conductor — Lightweight async task queue for Python
-(PostgreSQL-backed, no Redis).
+(PostgreSQL-backed by default; SQLite and MySQL/MariaDB supported via
+backend extras.  No Redis, no message broker).
 
 Exposes the public API of the Conductor library.
 """
