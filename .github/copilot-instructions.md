@@ -5,7 +5,7 @@
 - **Python**: 3.11+ only, asyncio-native, **no threads**
 - **Database**: PostgreSQL 12+ (default; `asyncpg`), **MySQL 8.0.16+/MariaDB 10.6+** (`asyncmy`, extra `mysql`) or **SQLite** (`aiosqlite`, extra `sqlite`, single-process contract). **No Redis**, no external message brokers
 - **Architecture**: Polling-based task dispatch against the database; exactly-once semantics; idempotent task processing. The DSN scheme selects the backend and all SQL is rendered through a per-backend `SqlDialect`
-- **Status**: v0.2.0 released to PyPI (2026-08-13). v0.3.0 (SQLite, MySQL/MariaDB, OpenTelemetry tracing) is prepared and committed — tag/publish pending.
+- **Status**: v0.3.0 **RELEASED** (2026-09-15) — SQLite, MySQL/MariaDB and OpenTelemetry tracing, published to PyPI (`conductor-task-queue`) and as GitHub Release `v0.3.0`. Note: v0.2.0 on PyPI is broken (see the packaging note below) and should be yanked.
 
 ## Code Style & Formatting
 - **Line length**: 100 characters (enforced by black and flake8)
@@ -119,7 +119,7 @@ Before finishing ANY task (feature, bug fix, refactor, or doc change), the agent
 - **v0.2 Sprint 5**: COMPLETE — Circuit breaker (worker-side, per-task-type).
 - **v0.2 Sprint 6**: COMPLETE — Task chaining/dependencies (schema v5 `BLOCKED`).
 - **v0.2.0**: RELEASED (2026-08-13) — Sprints 1–6 complete, published to PyPI (`conductor-task-queue`), GitHub Release `v0.2.0`.
-- **v0.3 Track A**: COMPLETE (2026-09-15) — pluggable DB backends (`conductor/db/backends/` + `conductor/db/ddl/`) and the **SQLite** backend. Schema stays **v5** (no migration). Plan of record: `todo_p3.md` (git-untracked) — v0.3.0 (SQLite + OpenTelemetry, schema v6), v0.4.0 (MySQL), v0.5.0 (workflows, v7), v0.6.0 (webhooks/batch, v8 + tenancy/auth, v9).
+- **v0.3.0**: RELEASED (2026-09-15) — Tracks A (dialect core + SQLite), B (OpenTelemetry tracing, schema v6) and A2 (MySQL/MariaDB) published to PyPI (`conductor-task-queue` 0.3.0) and GitHub Release `v0.3.0`. **Packaging note**: v0.3.0 added `protobuf>=7.35.1` — the v0.2.0 wheel omitted it and could not be imported at all (`ModuleNotFoundError: No module named 'google'`), which is also why the Docker/scheduled CI jobs were red for weeks.
 - **v0.3 Track B**: COMPLETE (2026-09-15) — OpenTelemetry tracing + cross-process trace context (schema **v6** `traceparent`). Optional extra `otel`.
 - **v0.3.0 Task A2**: COMPLETE (2026-09-15) — **MySQL/MariaDB backend** (optional extra `mysql` = `asyncmy`). Schema stays **v6** (no migration). Live-verified against MySQL 8.0.46/8.4 and MariaDB 11.8.9 in Docker (680 passed / 53 skipped each, plus an 81-test three-backend parity matrix); MariaDB 10.5.29 is correctly rejected at `connect()`.
 - **v0.4.0 Tracks C/D/E** (planned, renumbered after v0.3.0 absorbed MySQL): advanced workflows (v7), webhook callbacks + batch operations (v8), tenancy/auth/quota enablers (v9), multi-region docs.
