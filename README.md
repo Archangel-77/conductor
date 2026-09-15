@@ -2,7 +2,7 @@
 
 **A lightweight, production-ready async task queue for Python teams that don't need Redis.**
 
-Conductor orchestrates reliable, distributed task execution with exactly-once semantics, built entirely on PostgreSQL. Simple API, observable by default, deploy anywhere.
+Conductor orchestrates reliable, distributed task execution with exactly-once semantics, on the PostgreSQL, MySQL/MariaDB or SQLite database you already have. Simple API, observable by default, deploy anywhere.
 
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue)](https://www.python.org/)
 [![PostgreSQL 12+](https://img.shields.io/badge/PostgreSQL-12%2B-336791)](https://www.postgresql.org/)
@@ -934,8 +934,8 @@ covered in detail in [docs/deployment.md](docs/deployment.md).
 - **Docker** — a `python:3.11-slim` `Dockerfile` (non-root user, healthcheck
   on `/health`, `ENTRYPOINT ["conductor"] CMD ["worker"]`):
   ```bash
-  docker build -t conductor:0.2.0 .
-  docker run --rm -e DATABASE_URL=postgresql://... -p 8000:8000 conductor:0.2.0
+  docker build -t conductor:0.3.0 .
+  docker run --rm -e DATABASE_URL=postgresql://... -p 8000:8000 conductor:0.3.0
   ```
 - **Docker Compose** — `docker-compose.yml` (dev: PostgreSQL + worker) and
   `docker-compose.prod.yml` (replicas, resource limits, log rotation, nightly
@@ -999,7 +999,7 @@ in [docs/grafana/](docs/grafana/README.md).
 
 ### Key Design Decisions
 
-1. **PostgreSQL as source of truth** – No separate message broker. All state lives in one place.
+1. **The database is the source of truth** – No separate message broker. All state lives in one place.
 2. **Polling-based task dispatch** – Workers poll for new tasks every 500ms. No complex subscription logic.
 3. **Idempotent task processing** – Workers record task IDs. Duplicate submissions are deduplicated automatically.
 4. **Async-first** – Built on asyncio. No threads, no blocking I/O.
@@ -1451,18 +1451,18 @@ worker = Worker(database_url=database_url)
 - Docker & deployment examples (Sprint 6)
 - Comprehensive documentation (Sprint 6)
 
-### Phase 2 (v0.2 — Planned)
+### Phase 2 (v0.2.0 — released 2026-08-13)
 
-🔲 Task routing, priority queues, scheduled/recurring tasks (cron)
-🔲 Web dashboard, gRPC API
-🔲 Circuit breaker pattern, task dependencies/chaining
+✅ Task routing, priority queues, scheduled/recurring tasks (cron)
+✅ Web dashboard, gRPC API
+✅ Circuit breaker pattern, task dependencies/chaining
 
-### Phase 3 (v0.3 — In Progress)
+### Phase 3 (v0.3.0 — released 2026-09-15; v0.4.0+ in progress)
 
 ✅ SQLite backend (v0.3.0) — embedded, single-process, parity-tested against PostgreSQL
 ✅ OpenTelemetry tracing (v0.3.0) — cross-process trace context (schema v6)
-✅ MySQL/MariaDB backend (v0.4.0) — asyncmy driver, `FOR UPDATE SKIP LOCKED` row claiming
-🔲 Advanced workflows, task versioning
+✅ MySQL/MariaDB backend (v0.3.0) — asyncmy driver, `FOR UPDATE SKIP LOCKED` row claiming
+🔲 Advanced workflows, task versioning (v0.4.0)
 
 ---
 

@@ -764,11 +764,11 @@ task_b_id = await queue.submit(
 ## Phase 3: v0.3+ Future
 
 ### Goals
-- 🔲 MySQL/MariaDB backend support
-- 🔲 SQLite backend (embedded, single-server)
-- 🔲 Distributed tracing (OpenTelemetry)
+- [x] MySQL/MariaDB backend support — shipped in **v0.3.0** (2026-09-15)
+- [x] SQLite backend (embedded, single-server) — shipped in **v0.3.0**
+- [x] Distributed tracing (OpenTelemetry) — shipped in **v0.3.0** (schema v6 `traceparent`)
 - 🔲 Managed SaaS offering (Conductor Cloud)
-- 🔲 Advanced workflow orchestration
+- 🔲 Advanced workflow orchestration — next (v0.4.0)
 - 🔲 Multi-database replication
 
 ### Possible Features
@@ -1240,7 +1240,7 @@ Python: >=3.11
 ```python
 setup(
     name="conductor-task-queue",
-    version="0.2.0",
+    version="0.3.0",
     description="Lightweight async task queue for Python",
     author="Panagiotis Panageas",
     packages=find_packages(),
@@ -1334,7 +1334,7 @@ spec:
     spec:
       containers:
       - name: conductor
-        image: myregistry/conductor:0.2.0
+        image: myregistry/conductor:0.3.0
         env:
         - name: DATABASE_URL
           valueFrom:
@@ -1587,10 +1587,10 @@ class Worker:
 - [x] Task dependencies
 
 ### Phase 3 (v0.3+) – Enterprise
-- [ ] Multi-database support (MySQL, SQLite)
-- [ ] Distributed tracing (OpenTelemetry)
+- [x] Multi-database support (MySQL, SQLite) — v0.3.0
+- [x] Distributed tracing (OpenTelemetry) — v0.3.0
 - [ ] Conductor Cloud (SaaS)
-- [ ] Advanced workflows (DAGs)
+- [ ] Advanced workflows (DAGs) — v0.4.0, see `todo_p3.md`
 - [ ] Task versioning
 
 ---

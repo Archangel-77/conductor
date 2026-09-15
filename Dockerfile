@@ -2,10 +2,10 @@
 # Conductor — Worker Image
 # ─────────────────────────────────────────────────────────────────────────
 # Build:
-#   docker build -t conductor:0.2.0 .
+#   docker build -t conductor:0.3.0 .
 #
 # Run (worker polls PostgreSQL; see docker-compose.yml for a full stack):
-#   docker run --rm -e DATABASE_URL=postgresql://... conductor:0.2.0
+#   docker run --rm -e DATABASE_URL=postgresql://... conductor:0.3.0
 #
 # Handlers: mount a module and pass it via CONDUCTOR_HANDLERS_MODULE or
 #   `conductor worker --handlers myapp.handlers`.

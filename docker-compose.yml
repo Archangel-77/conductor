@@ -33,7 +33,7 @@ services:
 
   worker:
     build: .
-    image: conductor:0.2.0
+    image: conductor:0.3.0
     container_name: conductor-worker
     restart: unless-stopped
     depends_on:

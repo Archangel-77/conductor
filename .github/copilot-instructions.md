@@ -1,11 +1,11 @@
 # Conductor — Agent Instructions
 
 ## Project Identity
-- **Package**: `conductor-task-queue` v0.2.0, MIT license, published to PyPI
+- **Package**: `conductor-task-queue` v0.3.0, MIT license, published to PyPI
 - **Python**: 3.11+ only, asyncio-native, **no threads**
 - **Database**: PostgreSQL 12+ (default; `asyncpg`), **MySQL 8.0.16+/MariaDB 10.6+** (`asyncmy`, extra `mysql`) or **SQLite** (`aiosqlite`, extra `sqlite`, single-process contract). **No Redis**, no external message brokers
 - **Architecture**: Polling-based task dispatch against the database; exactly-once semantics; idempotent task processing. The DSN scheme selects the backend and all SQL is rendered through a per-backend `SqlDialect`
-- **Status**: v0.2.0 released to PyPI (2026-08-13). v0.3/v0.4 work: SQLite + OpenTelemetry (v0.3.0), MySQL/MariaDB (v0.4.0)
+- **Status**: v0.2.0 released to PyPI (2026-08-13). v0.3.0 (SQLite, MySQL/MariaDB, OpenTelemetry tracing) is prepared and committed — tag/publish pending.
 
 ## Code Style & Formatting
 - **Line length**: 100 characters (enforced by black and flake8)
@@ -121,11 +121,11 @@ Before finishing ANY task (feature, bug fix, refactor, or doc change), the agent
 - **v0.2.0**: RELEASED (2026-08-13) — Sprints 1–6 complete, published to PyPI (`conductor-task-queue`), GitHub Release `v0.2.0`.
 - **v0.3 Track A**: COMPLETE (2026-09-15) — pluggable DB backends (`conductor/db/backends/` + `conductor/db/ddl/`) and the **SQLite** backend. Schema stays **v5** (no migration). Plan of record: `todo_p3.md` (git-untracked) — v0.3.0 (SQLite + OpenTelemetry, schema v6), v0.4.0 (MySQL), v0.5.0 (workflows, v7), v0.6.0 (webhooks/batch, v8 + tenancy/auth, v9).
 - **v0.3 Track B**: COMPLETE (2026-09-15) — OpenTelemetry tracing + cross-process trace context (schema **v6** `traceparent`). Optional extra `otel`.
-- **v0.4 Track A2**: COMPLETE (2026-09-16) — **MySQL/MariaDB backend** (optional extra `mysql` = `asyncmy`). Schema stays **v6** (no migration). Runtime behaviour is **CI-verified only** (the `mysql` CI job runs MySQL 8.0 + 8.4; there is no MySQL server locally).
-- **v0.3 Tracks C/D/E** (planned): advanced workflows (v7), webhook callbacks + batch operations (v8), tenancy/auth/quota enablers (v9), multi-region docs.
+- **v0.3.0 Task A2**: COMPLETE (2026-09-15) — **MySQL/MariaDB backend** (optional extra `mysql` = `asyncmy`). Schema stays **v6** (no migration). Live-verified against MySQL 8.0.46/8.4 and MariaDB 11.8.9 in Docker (680 passed / 53 skipped each, plus an 81-test three-backend parity matrix); MariaDB 10.5.29 is correctly rejected at `connect()`.
+- **v0.4.0 Tracks C/D/E** (planned, renumbered after v0.3.0 absorbed MySQL): advanced workflows (v7), webhook callbacks + batch operations (v8), tenancy/auth/quota enablers (v9), multi-region docs.
 - Do **not** implement later v0.3 features before the plan calls for them — follow `todo_p3.md`.
 
-### Codified decisions — v0.4 Track A2 (MySQL/MariaDB backend)
+### Codified decisions — v0.3.0 Task A2 (MySQL/MariaDB backend)
 - **Driver**: `asyncmy` only, in the optional extra `mysql` (declared in **both** `pyproject.toml` and `setup.py`). `conductor/db/backends/mysql.py` is the only module importing `asyncmy`; `backends/__init__.py` must **not** re-export `MySqlPool` (optional drivers stay lazily imported by `registry.create_pool()`, exactly like `SqlitePool`). Minimum server: **MySQL 8.0.16+** (named `CHECK` constraints) / **MariaDB 10.6+** (`FOR UPDATE SKIP LOCKED`; MariaDB 10.5 fails the polling query, so `validate_server_version()` rejects it at `connect()` with the detected version); MySQL 5.7 is unsupported.
 - **Verified live (2026-09-15, Docker)**: full non-perf suite green on MySQL 8.0.46, MySQL 8.4 and MariaDB 11.8.9 (680 passed / 53 skipped each; 733 collected, the 26-test `test_db_schema.py` skip is PostgreSQL-only by design) and on PostgreSQL 16 (706 passed / 27 skipped). MariaDB 10.5.29 is correctly rejected. CI runs the parity matrix against MySQL 8.0 + 8.4 + MariaDB 11.
 - **`execute()` returns `Any`** in `ConnectionProtocol`/`PoolProtocol` and `DatabasePool`: PostgreSQL/SQLite return a command tag (`"UPDATE 1"`), MySQL returns an **int** rowcount. Always go through `SqlDialect.normalize_rowcount()`; `MySqlConnection.execute` coerces asyncmy's loosely-typed `cursor.rowcount` and reports `0` for DDL/SELECT.

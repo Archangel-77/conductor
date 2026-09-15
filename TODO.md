@@ -1,7 +1,7 @@
 # Conductor Development TODO
 
 **Project**: Lightweight async task queue for Python (PostgreSQL-backed, no Redis)  
-**Version**: 0.2.0  
+**Version**: 0.3.0  
 **Timeline**: ~6 weeks (6 sprints)  
 **Last Updated**: 2025-01-15
 
@@ -1034,7 +1034,7 @@
 
 ### Multi-Database Support
 
-- [x] MySQL/MariaDB backend (v0.4 Track A2, 2026-09-16 — `asyncmy`, extra `mysql`; MySQL 8.0.16+/MariaDB 10.5+)
+- [x] MySQL/MariaDB backend (v0.3.0, 2026-09-15 — `asyncmy`, extra `mysql`; MySQL 8.0.16+/MariaDB 10.6+)
   - [x] Rewrite queries for MySQL syntax (per-backend `SqlDialect` + `ddl/mysql.py`; `supports_returning` fallbacks)
   - [x] Test thoroughly (parity matrix leg + unit tests for dialect/DDL/rendering; runtime verification in the CI `mysql` job)
   - [x] Document (`docs/installation.md`, `configuration.md`, `deployment.md`, `troubleshooting.md`, README)
