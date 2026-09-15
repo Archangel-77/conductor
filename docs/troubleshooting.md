@@ -98,11 +98,37 @@ overrode it in the DSN with `?charset=utf8`, non-BMP characters fail: use
 
 ### Tasks execute twice / workers idle
 
-Verify `sql_mode` and the server version: row claiming relies on
-`FOR UPDATE SKIP LOCKED`, which needs **InnoDB** and MySQL 8.0+. On a 5.7
-server no rows are ever claimed, and tasks stay `pending` forever. Run
-`SELECT VERSION();` and check the schemas with
-`SELECT TABLE_NAME, ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE();`.
+Upgrade to **0.3.1** if you run more than one worker: in 0.3.0 and earlier the
+poll query released its `FOR UPDATE SKIP LOCKED` locks before the task was marked
+`processing`, so two workers polling at the same time could both execute the same
+task (45–78 executions for 40 tasks in a two-worker run). 0.3.1 claims tasks
+atomically on every backend.
+
+If tasks stay `pending` forever instead, check that the tables really are InnoDB
+on MySQL 8.0.16+ / MariaDB 10.6+ — row claiming depends on `FOR UPDATE SKIP
+LOCKED` and named `CHECK` constraints. Run `SELECT VERSION();` and check the
+schemas with `SELECT TABLE_NAME, ENGINE FROM information_schema.TABLES WHERE
+TABLE_SCHEMA = DATABASE();`.
+
+### `Timed out waiting for a MySQL connection (30.0s)`
+
+The worker exhausted its connection pool (`DB_POOL_MAX_SIZE`, default 10) and
+gave up after `DB_POOL_TIMEOUT` seconds. On Python 3.11 the `asyncmy` pool can
+also lose the wakeup for a released connection when an acquisition waiter is
+cancelled, which made workers stall with 0 tasks completed no matter how large
+the pool was. Both are addressed in **0.3.1** (acquisitions are retried until the
+timeout budget is spent); upgrade, and raise `DB_POOL_MAX_SIZE` /
+`DB_POOL_TIMEOUT` if your handlers keep many connections busy.
+
+### Tasks stuck in `processing` after a worker crash
+
+Expected for at most one stale-claim window: a claim marks the row `processing`
+immediately, so a worker killed mid-execution leaves it behind until another
+worker reclaims it (the claim must be older than the window *and* its owner must
+have stopped heartbeating). The window defaults to
+`max(3 × heartbeat interval, 30s)` and can be tuned with
+`Worker(stale_claim_timeout=…)`. Warnings such as `Reclaimed 1 task(s) stranded
+by dead workers.` are the recovery working, not a failure.
 
 ### Benign driver warnings in the logs
 

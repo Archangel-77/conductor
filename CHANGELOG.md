@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-15
+
+### Fixed
+
+- **Exactly-once claiming (critical).** The poll query applied
+  `FOR UPDATE SKIP LOCKED` to a *read-only* statement, so the row locks were
+  released as soon as it ended and the task only became `processing` later,
+  inside the execution path. Any worker polling in that window received the same
+  rows and executed them: **2 workers × 40 tasks produced 45–78 executions**
+  (up to 38 duplicate executions) on both PostgreSQL and MySQL/MariaDB, while a
+  single worker always produced exactly 40. Polling now claims atomically — the
+  row moves to `processing` in the same statement (PostgreSQL and SQLite, using
+  a *materialised* CTE) or inside one transaction (MySQL/MariaDB, which has no
+  `RETURNING`) — so two workers can never be handed the same task. The worker
+  claims at most as many rows as it has free concurrency slots (over-claiming
+  would hide work from other workers) and hands the claim back if its circuit
+  breaker skips the task.
+- **PostgreSQL ignored `LIMIT` while claiming.** With `FOR UPDATE SKIP LOCKED`
+  inside an `UPDATE` subquery, PostgreSQL ignores the `LIMIT` for the rows it
+  locks and updates: a claim of 10 claimed all 40 pending rows and stranded 30 of
+  them in `processing`. The locking read now happens in a materialised CTE
+  (`WITH claimed AS MATERIALIZED (…) … FOR UPDATE SKIP LOCKED`), which keeps the
+  returned row set and the locked row set identical.
+- **MySQL/MariaDB workers could stall on Python 3.11.** `MySqlPool.acquire()`
+  wrapped the driver pool in `asyncio.wait_for`; when such a waiter was
+  cancelled, `asyncmy`'s pool could consume the wakeup for a released connection
+  and leave it in the free list unreachable, so every other waiter parked until
+  its own timeout — `DatabaseError: Timed out waiting for a MySQL connection
+  (30.0s)` — and the worker stopped making progress (4 out of 4 two-worker runs
+  completed 0 of 40 tasks). Isolated with a Conductor-free `asyncmy` reproducer
+  on CPython 3.11 (3.12 and newer are unaffected); acquisition is now retried in
+  short slices until the configured `pool_timeout` budget is spent, and a fresh
+  acquire picks up the stranded connection immediately.
+- **Tasks stranded by a dead worker are reclaimed.** Because a claim now marks a
+  row `processing` immediately, a worker killed mid-execution would have held
+  that row forever. The worker returns such rows to `pending` (throttled, once
+  per stale window) when the claim is older than that window *and* its owner is
+  gone — no heartbeat row at all, or no heartbeat within the window. A live
+  worker executing a slow task keeps its claim. Tune the window with
+  `Worker(stale_claim_timeout=…)` (default: `max(3 × heartbeat interval, 30s)`).
+
+### Added
+
+- `QueryBuilder.claim_pending_tasks()` (atomic claim),
+  `QueryBuilder.release_claim()` (hand a claimed row back) and
+  `QueryBuilder.reclaim_stale_tasks()` (dead-worker recovery), plus the
+  `Worker(stale_claim_timeout=…)` setting.
+- Regression coverage: `TestExactlyOnceClaim` in
+  `tests/integration/test_backend_matrix.py` (concurrent claims never overlap;
+  two workers execute each task exactly once; released and stale claims are
+  claimable again; a live owner keeps its claim) on every backend, and
+  `tests/unit/test_mysql_pool.py` for the pool retry.
+- Verified live beyond the test suite: 2 worker **processes** × 40 tasks against
+  PostgreSQL 16 and MySQL 8.4 now finish with exactly 40 executions and no
+  duplicates (previously 50–78 executions), and Python 3.11 + MySQL now completes
+  40/40 in three consecutive runs (previously 0/40 in four).
+
 ## [0.3.0] - 2026-09-15
 
 ### Added
