@@ -119,8 +119,8 @@ jobs:
           python-version: "3.14"
           cache: pip
 
-      - name: Install package with dev, sqlite and mysql extras
-        run: pip install -e ".[dev,sqlite,mysql]"
+      - name: Install package with dev, sqlite, mysql and otel extras
+        run: pip install -e ".[dev,sqlite,mysql,otel]"
 
       - name: Run unit tests and the backend parity matrix (SQLite)
         run: pytest tests/unit tests/integration/test_backend_matrix.py --no-cov
@@ -173,8 +173,8 @@ jobs:
           python-version: "3.14"
           cache: pip
 
-      - name: Install package with dev, sqlite and mysql extras
-        run: pip install -e ".[dev,sqlite,mysql]"
+      - name: Install package with dev, sqlite, mysql and otel extras
+        run: pip install -e ".[dev,sqlite,mysql,otel]"
 
       - name: Run unit tests and the backend parity matrix (${{ matrix.server }})
         run: pytest tests/unit tests/integration/test_backend_matrix.py --no-cov
